@@ -955,12 +955,12 @@ server.prompt(
   })
 );
 
-// Get transport type from environment variable (default to stdio)
-const transportType = process.env.MCP_TRANSPORT || 'stdio';
+// Get transport type from environment variable (default to stdio, or sse if PORT is set)
+const transportType = process.env.MCP_TRANSPORT || (process.env.PORT ? 'sse' : 'stdio');
 
 if (transportType === 'sse') {
   // SSE transport - create HTTP server
-  const port = parseInt(process.env.MCP_PORT || '3000', 10);
+  const port = parseInt(process.env.MCP_PORT || process.env.PORT || '3000', 10);
   const endpoint = process.env.MCP_ENDPOINT || '/message';
 
   // Store active transports by session ID
