@@ -134,12 +134,7 @@ const usersApi = withRateLimit(new pipedrive.UsersApi(apiClient));
 // Create MCP server
 const server = new McpServer({
   name: "pipedrive-mcp-server",
-  version: "1.0.2",
-  capabilities: {
-    resources: {},
-    tools: {},
-    prompts: {}
-  }
+  version: "1.0.4"
 });
 
 // === TOOLS ===
