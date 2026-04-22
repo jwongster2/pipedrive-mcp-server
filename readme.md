@@ -4,7 +4,7 @@ This is a Model Context Protocol (MCP) server that connects to the Pipedrive API
 
 ## Features
 
-- Read-only access to Pipedrive data
+- Read and write access to Pipedrive data
 - Exposes deals, persons, organizations, and pipelines
 - Includes all fields including custom fields
 - Predefined prompts for common operations
@@ -12,6 +12,7 @@ This is a Model Context Protocol (MCP) server that connects to the Pipedrive API
 - JWT authentication support
 - Built-in rate limiting for API requests
 - Advanced deal filtering (by owner, status, date range, value, etc.)
+- Deal mutation tools for creating and updating deals
 
 ## Setup
 
@@ -167,6 +168,8 @@ To use this server with Claude for Desktop:
 - `get-users`: Get all users/owners from Pipedrive to identify owner IDs for filtering
 - `get-deals`: Get deals with flexible filtering options (search by title, date range, owner, stage, status, value range, etc.)
 - `get-deal`: Get a specific deal by ID (including custom fields)
+- `update-deal`: Update an existing deal, including custom fields via JSON input, but cannot change stage
+- `create-deal`: Create a new deal, including custom fields via JSON input, but cannot set stage
 - `get-deal-notes`: Get detailed notes and custom booking details for a specific deal
 - `search-deals`: Search deals by term
 - `get-persons`: Get all persons from Pipedrive (including custom fields)

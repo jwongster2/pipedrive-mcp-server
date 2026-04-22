@@ -89,6 +89,132 @@ const verifyRequestAuthentication = (req: http.IncomingMessage) => {
   }
 };
 
+interface DealMutationInput {
+  title?: string;
+  value?: number;
+  currency?: string;
+  status?: 'open' | 'won' | 'lost';
+  ownerId?: number | null;
+  personId?: number | null;
+  organizationId?: number | null;
+  expectedCloseDate?: string | null;
+  probability?: number | null;
+  visibleTo?: number;
+  customFieldsJson?: string;
+  additionalFieldsJson?: string;
+  clearFields?: string[];
+}
+
+const FORBIDDEN_DEAL_FIELDS = new Set(['stage_id', 'stageId']);
+
+const parseOptionalJsonObject = (value: string | undefined, fieldName: string): Record<string, unknown> => {
+  if (!value) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      throw new Error(`${fieldName} must be a JSON object`);
+    }
+
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`Invalid ${fieldName}: ${getErrorMessage(error)}`);
+  }
+};
+
+const assertNoForbiddenDealFields = (fields: Iterable<string>, source: string) => {
+  for (const field of fields) {
+    if (FORBIDDEN_DEAL_FIELDS.has(field)) {
+      throw new Error(`Updating deal stage is not allowed via ${source}`);
+    }
+  }
+};
+
+const buildPipedriveUrl = (path: string) => {
+  const url = new URL(`https://${process.env.PIPEDRIVE_DOMAIN!}${path}`);
+  url.searchParams.set('api_token', process.env.PIPEDRIVE_API_TOKEN!);
+  return url;
+};
+
+const callPipedriveApi = async (
+  method: 'POST' | 'PATCH',
+  path: string,
+  body: Record<string, unknown>
+) => {
+  const response = await limiter.schedule(() =>
+    fetch(buildPipedriveUrl(path), {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    })
+  );
+
+  const rawBody = await response.text();
+  const parsedBody = rawBody ? JSON.parse(rawBody) as any : null;
+
+  if (!response.ok) {
+    const apiError =
+      typeof parsedBody?.error === 'string'
+        ? parsedBody.error
+        : typeof parsedBody?.message === 'string'
+          ? parsedBody.message
+          : response.statusText;
+
+    throw new Error(`Pipedrive API request failed (${response.status}): ${apiError}`);
+  }
+
+  return parsedBody;
+};
+
+const buildDealPayload = ({
+  title,
+  value,
+  currency,
+  status,
+  ownerId,
+  personId,
+  organizationId,
+  expectedCloseDate,
+  probability,
+  visibleTo,
+  customFieldsJson,
+  additionalFieldsJson,
+  clearFields = [],
+}: DealMutationInput) => {
+  const additionalFields = parseOptionalJsonObject(additionalFieldsJson, 'additionalFieldsJson');
+  const customFields = parseOptionalJsonObject(customFieldsJson, 'customFieldsJson');
+
+  assertNoForbiddenDealFields(Object.keys(additionalFields), 'additionalFieldsJson');
+  assertNoForbiddenDealFields(clearFields, 'clearFields');
+
+  const payload: Record<string, unknown> = {
+    ...additionalFields,
+    ...customFields,
+  };
+
+  if (title !== undefined) payload.title = title;
+  if (value !== undefined) payload.value = value;
+  if (currency !== undefined) payload.currency = currency;
+  if (status !== undefined) payload.status = status;
+  if (ownerId !== undefined) payload.owner_id = ownerId;
+  if (personId !== undefined) payload.person_id = personId;
+  if (organizationId !== undefined) payload.org_id = organizationId;
+  if (expectedCloseDate !== undefined) payload.expected_close_date = expectedCloseDate;
+  if (probability !== undefined) payload.probability = probability;
+  if (visibleTo !== undefined) payload.visible_to = visibleTo;
+
+  for (const fieldName of clearFields) {
+    payload[fieldName] = null;
+  }
+
+  return payload;
+};
+
 const limiter = new Bottleneck({
   minTime: Number(process.env.PIPEDRIVE_RATE_LIMIT_MIN_TIME_MS || 250),
   maxConcurrent: Number(process.env.PIPEDRIVE_RATE_LIMIT_MAX_CONCURRENT || 2),
@@ -373,6 +499,124 @@ server.tool(
         content: [{
           type: "text",
           text: `Error fetching deal ${dealId}: ${getErrorMessage(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Update an existing deal
+server.tool(
+  "update-deal",
+  "Update an existing Pipedrive deal. Supports common deal fields directly and custom fields via JSON objects.",
+  {
+    dealId: z.number().describe("Pipedrive deal ID"),
+    title: z.string().optional().describe("Updated deal title"),
+    value: z.number().optional().describe("Updated deal value"),
+    currency: z.string().optional().describe("Updated currency code such as EUR or USD"),
+    status: z.enum(['open', 'won', 'lost']).optional().describe("Updated deal status"),
+    ownerId: z.number().nullable().optional().describe("Updated owner/user ID, or null to clear if allowed"),
+    personId: z.number().nullable().optional().describe("Updated linked person ID, or null to unlink"),
+    organizationId: z.number().nullable().optional().describe("Updated linked organization ID, or null to unlink"),
+    expectedCloseDate: z.string().nullable().optional().describe("Updated expected close date in YYYY-MM-DD format"),
+    probability: z.number().min(0).max(100).nullable().optional().describe("Updated probability from 0 to 100"),
+    visibleTo: z.number().optional().describe("Updated visibility setting"),
+    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values, e.g. {"8f4...":"New value"}'),
+    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive deal fields to update, excluding stage_id'),
+    clearFields: z.array(z.string()).optional().describe("Field keys to explicitly clear by setting them to null, excluding stage_id")
+  },
+  {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true
+  },
+  async ({ dealId, ...input }) => {
+    try {
+      const payload = buildDealPayload(input);
+
+      if (Object.keys(payload).length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error updating deal: no fields were provided to update"
+          }],
+          isError: true
+        };
+      }
+
+      const response = await callPipedriveApi('PATCH', `/api/v2/deals/${dealId}`, payload);
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Updated deal ${dealId}`,
+            applied_updates: payload,
+            data: response.data ?? response
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error updating deal ${dealId}:`, error);
+      return {
+        content: [{
+          type: "text",
+          text: `Error updating deal ${dealId}: ${getErrorMessage(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Create a new deal
+server.tool(
+  "create-deal",
+  "Create a new Pipedrive deal. Supports common deal fields directly and custom fields via JSON objects.",
+  {
+    title: z.string().describe("Deal title"),
+    value: z.number().optional().describe("Deal value"),
+    currency: z.string().optional().describe("Currency code such as EUR or USD"),
+    status: z.enum(['open', 'won', 'lost']).optional().describe("Initial deal status"),
+    ownerId: z.number().nullable().optional().describe("Owner/user ID"),
+    personId: z.number().nullable().optional().describe("Linked person ID"),
+    organizationId: z.number().nullable().optional().describe("Linked organization ID"),
+    expectedCloseDate: z.string().nullable().optional().describe("Expected close date in YYYY-MM-DD format"),
+    probability: z.number().min(0).max(100).nullable().optional().describe("Probability from 0 to 100"),
+    visibleTo: z.number().optional().describe("Visibility setting"),
+    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values, e.g. {"8f4...":"New value"}'),
+    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive deal fields to set, excluding stage_id'),
+    clearFields: z.array(z.string()).optional().describe("Field keys to set to null as part of creation, excluding stage_id")
+  },
+  {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: false,
+    openWorldHint: true
+  },
+  async (input) => {
+    try {
+      const payload = buildDealPayload(input);
+      const response = await callPipedriveApi('POST', '/api/v2/deals', payload);
+      const createdDeal = response.data ?? response;
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Created deal ${createdDeal?.id ?? 'unknown'}`,
+            data: createdDeal
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error("Error creating deal:", error);
+      return {
+        content: [{
+          type: "text",
+          text: `Error creating deal: ${getErrorMessage(error)}`
         }],
         isError: true
       };
