@@ -113,6 +113,76 @@ interface CreateDealToolInput extends DealMutationInput {
   title: string;
 }
 
+interface PersonMutationInput {
+  name?: string;
+  ownerId?: number | null;
+  organizationId?: number | null;
+  email?: string | null;
+  phone?: string | null;
+  emailsJson?: string;
+  phonesJson?: string;
+  visibleTo?: number;
+  customFieldsJson?: string;
+  additionalFieldsJson?: string;
+  clearFields?: string[];
+}
+
+interface CreatePersonToolInput extends PersonMutationInput {
+  name: string;
+}
+
+interface UpdatePersonToolInput extends PersonMutationInput {
+  personId: number;
+}
+
+interface OrganizationMutationInput {
+  name?: string;
+  ownerId?: number | null;
+  visibleTo?: number;
+  address?: string | null;
+  country?: string | null;
+  locality?: string | null;
+  customFieldsJson?: string;
+  additionalFieldsJson?: string;
+  clearFields?: string[];
+}
+
+interface CreateOrganizationToolInput extends OrganizationMutationInput {
+  name: string;
+}
+
+interface CreateNoteToolInput {
+  content: string;
+  dealId?: number;
+  personId?: number;
+  organizationId?: number;
+  leadId?: string;
+  userId?: number;
+  addTime?: string;
+  pinnedToDeal?: boolean;
+  pinnedToPerson?: boolean;
+  pinnedToOrganization?: boolean;
+  pinnedToLead?: boolean;
+}
+
+interface CreateActivityToolInput {
+  subject: string;
+  type?: string;
+  ownerId?: number;
+  dealId?: number;
+  personId?: number;
+  organizationId?: number;
+  leadId?: string;
+  dueDate?: string;
+  dueTime?: string;
+  duration?: string;
+  busy?: boolean;
+  done?: boolean;
+  note?: string;
+  publicDescription?: string;
+  priority?: number;
+}
+
 const FORBIDDEN_DEAL_FIELDS = new Set(['stage_id', 'stageId']);
 
 const parseOptionalJsonObject = (value: string | undefined, fieldName: string): Record<string, unknown> => {
@@ -128,6 +198,24 @@ const parseOptionalJsonObject = (value: string | undefined, fieldName: string): 
     }
 
     return parsed as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(`Invalid ${fieldName}: ${getErrorMessage(error)}`);
+  }
+};
+
+const parseOptionalJsonArray = (value: string | undefined, fieldName: string): unknown[] | undefined => {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(value);
+
+    if (!Array.isArray(parsed)) {
+      throw new Error(`${fieldName} must be a JSON array`);
+    }
+
+    return parsed;
   } catch (error) {
     throw new Error(`Invalid ${fieldName}: ${getErrorMessage(error)}`);
   }
@@ -222,6 +310,180 @@ const buildDealPayload = ({
 
   return payload;
 };
+
+const buildPersonPayload = ({
+  name,
+  ownerId,
+  organizationId,
+  email,
+  phone,
+  emailsJson,
+  phonesJson,
+  visibleTo,
+  customFieldsJson,
+  additionalFieldsJson,
+  clearFields = [],
+}: PersonMutationInput) => {
+  const additionalFields = parseOptionalJsonObject(additionalFieldsJson, 'additionalFieldsJson');
+  const customFields = parseOptionalJsonObject(customFieldsJson, 'customFieldsJson');
+  const emails = parseOptionalJsonArray(emailsJson, 'emailsJson');
+  const phones = parseOptionalJsonArray(phonesJson, 'phonesJson');
+
+  const payload: Record<string, unknown> = {
+    ...additionalFields,
+    ...customFields,
+  };
+
+  if (name !== undefined) payload.name = name;
+  if (ownerId !== undefined) payload.owner_id = ownerId;
+  if (organizationId !== undefined) payload.org_id = organizationId;
+  if (visibleTo !== undefined) payload.visible_to = visibleTo;
+
+  if (emails !== undefined) {
+    payload.emails = emails;
+  } else if (email !== undefined) {
+    payload.emails = email === null ? [] : [{ value: email, primary: true, label: 'work' }];
+  }
+
+  if (phones !== undefined) {
+    payload.phones = phones;
+  } else if (phone !== undefined) {
+    payload.phones = phone === null ? [] : [{ value: phone, primary: true, label: 'work' }];
+  }
+
+  for (const fieldName of clearFields) {
+    payload[fieldName] = null;
+  }
+
+  return payload;
+};
+
+const buildOrganizationPayload = ({
+  name,
+  ownerId,
+  visibleTo,
+  address,
+  country,
+  locality,
+  customFieldsJson,
+  additionalFieldsJson,
+  clearFields = [],
+}: OrganizationMutationInput) => {
+  const additionalFields = parseOptionalJsonObject(additionalFieldsJson, 'additionalFieldsJson');
+  const customFields = parseOptionalJsonObject(customFieldsJson, 'customFieldsJson');
+
+  const payload: Record<string, unknown> = {
+    ...additionalFields,
+    ...customFields,
+  };
+
+  if (name !== undefined) payload.name = name;
+  if (ownerId !== undefined) payload.owner_id = ownerId;
+  if (visibleTo !== undefined) payload.visible_to = visibleTo;
+  if (address !== undefined) payload.address = address;
+  if (country !== undefined) payload.country = country;
+  if (locality !== undefined) payload.locality = locality;
+
+  for (const fieldName of clearFields) {
+    payload[fieldName] = null;
+  }
+
+  return payload;
+};
+
+const buildNotePayload = ({
+  content,
+  dealId,
+  personId,
+  organizationId,
+  leadId,
+  userId,
+  addTime,
+  pinnedToDeal,
+  pinnedToPerson,
+  pinnedToOrganization,
+  pinnedToLead,
+}: CreateNoteToolInput) => {
+  if (
+    dealId === undefined &&
+    personId === undefined &&
+    organizationId === undefined &&
+    leadId === undefined
+  ) {
+    throw new Error('A note must be attached to at least one deal, person, organization, or lead');
+  }
+
+  const payload: Record<string, unknown> = {
+    content,
+  };
+
+  if (dealId !== undefined) payload.deal_id = dealId;
+  if (personId !== undefined) payload.person_id = personId;
+  if (organizationId !== undefined) payload.org_id = organizationId;
+  if (leadId !== undefined) payload.lead_id = leadId;
+  if (userId !== undefined) payload.user_id = userId;
+  if (addTime !== undefined) payload.add_time = addTime;
+  if (pinnedToDeal !== undefined) payload.pinned_to_deal_flag = Number(pinnedToDeal);
+  if (pinnedToPerson !== undefined) payload.pinned_to_person_flag = Number(pinnedToPerson);
+  if (pinnedToOrganization !== undefined) payload.pinned_to_organization_flag = Number(pinnedToOrganization);
+  if (pinnedToLead !== undefined) payload.pinned_to_lead_flag = Number(pinnedToLead);
+
+  return payload;
+};
+
+const buildActivityPayload = ({
+  subject,
+  type = 'task',
+  ownerId,
+  dealId,
+  personId,
+  organizationId,
+  leadId,
+  dueDate,
+  dueTime,
+  duration,
+  busy,
+  done,
+  note,
+  publicDescription,
+  priority,
+}: CreateActivityToolInput) => {
+  const payload: Record<string, unknown> = {
+    subject,
+    type,
+  };
+
+  if (ownerId !== undefined) payload.owner_id = ownerId;
+  if (dealId !== undefined) payload.deal_id = dealId;
+  if (personId !== undefined) payload.person_id = personId;
+  if (organizationId !== undefined) payload.org_id = organizationId;
+  if (leadId !== undefined) payload.lead_id = leadId;
+  if (dueDate !== undefined) payload.due_date = dueDate;
+  if (dueTime !== undefined) payload.due_time = dueTime;
+  if (duration !== undefined) payload.duration = duration;
+  if (busy !== undefined) payload.busy = busy;
+  if (done !== undefined) payload.done = done;
+  if (note !== undefined) payload.note = note;
+  if (publicDescription !== undefined) payload.public_description = publicDescription;
+  if (priority !== undefined) payload.priority = priority;
+
+  return payload;
+};
+
+const createTextToolResult = (text: string) => ({
+  content: [{
+    type: "text" as const,
+    text
+  }]
+});
+
+const createTextToolErrorResult = (text: string) => ({
+  content: [{
+    type: "text" as const,
+    text
+  }],
+  isError: true
+});
 
 const limiter = new Bottleneck({
   minTime: Number(process.env.PIPEDRIVE_RATE_LIMIT_MIN_TIME_MS || 250),
@@ -613,6 +875,256 @@ server.tool(
         content: [{
           type: "text",
           text: `Error creating deal: ${getErrorMessage(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Create a new person
+server.tool(
+  "create-person",
+  "Create a new Pipedrive person/contact. Supports common fields directly and custom fields via JSON objects.",
+  {
+    name: z.string().describe("Person name"),
+    ownerId: z.number().nullable().optional().describe("Owner/user ID"),
+    organizationId: z.number().nullable().optional().describe("Linked organization ID"),
+    email: z.string().nullable().optional().describe("Primary email address"),
+    phone: z.string().nullable().optional().describe("Primary phone number"),
+    emailsJson: z.string().optional().describe('JSON array for advanced email objects, e.g. [{"value":"taylor@example.com","primary":true}]'),
+    phonesJson: z.string().optional().describe('JSON array for advanced phone objects, e.g. [{"value":"+61...","primary":true}]'),
+    visibleTo: z.number().optional().describe("Visibility setting"),
+    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values'),
+    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive person fields to set'),
+    clearFields: z.array(z.string()).optional().describe("Field keys to set to null")
+  },
+  async (input: CreatePersonToolInput) => {
+    try {
+      const payload = buildPersonPayload(input);
+      const response = await callPipedriveApi('POST', '/api/v2/persons', payload);
+      const createdPerson = response.data ?? response;
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Created person ${createdPerson?.id ?? 'unknown'}`,
+            data: createdPerson
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error("Error creating person:", error);
+      return {
+        content: [{
+          type: "text",
+          text: `Error creating person: ${getErrorMessage(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Update an existing person
+server.tool(
+  "update-person",
+  "Update an existing Pipedrive person/contact. Useful for fixing missing email or phone details.",
+  {
+    personId: z.number().describe("Pipedrive person ID"),
+    name: z.string().optional().describe("Updated person name"),
+    ownerId: z.number().nullable().optional().describe("Updated owner/user ID"),
+    organizationId: z.number().nullable().optional().describe("Updated linked organization ID"),
+    email: z.string().nullable().optional().describe("Primary email address to replace the current email set"),
+    phone: z.string().nullable().optional().describe("Primary phone number to replace the current phone set"),
+    emailsJson: z.string().optional().describe('JSON array for advanced email objects, e.g. [{"value":"ogi@example.com","primary":true}]'),
+    phonesJson: z.string().optional().describe('JSON array for advanced phone objects'),
+    visibleTo: z.number().optional().describe("Updated visibility setting"),
+    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values'),
+    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive person fields to update'),
+    clearFields: z.array(z.string()).optional().describe("Field keys to set to null")
+  },
+  async ({ personId, ...input }: UpdatePersonToolInput) => {
+    try {
+      const payload = buildPersonPayload(input);
+
+      if (Object.keys(payload).length === 0) {
+        return {
+          content: [{
+            type: "text",
+            text: "Error updating person: no fields were provided to update"
+          }],
+          isError: true
+        };
+      }
+
+      const response = await callPipedriveApi('PATCH', `/api/v2/persons/${personId}`, payload);
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Updated person ${personId}`,
+            applied_updates: payload,
+            data: response.data ?? response
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error(`Error updating person ${personId}:`, error);
+      return {
+        content: [{
+          type: "text",
+          text: `Error updating person ${personId}: ${getErrorMessage(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+// Create a new organization
+server.tool(
+  "create-organization",
+  "Create a new Pipedrive organization/company. Supports common fields directly and custom fields via JSON objects.",
+  {
+    name: z.string().describe("Organization name"),
+    ownerId: z.number().nullable().optional().describe("Owner/user ID"),
+    visibleTo: z.number().optional().describe("Visibility setting"),
+    address: z.string().nullable().optional().describe("Full address"),
+    country: z.string().nullable().optional().describe("Country"),
+    locality: z.string().nullable().optional().describe("City or locality"),
+    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values'),
+    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive organization fields to set'),
+    clearFields: z.array(z.string()).optional().describe("Field keys to set to null")
+  },
+  async (input: CreateOrganizationToolInput) => {
+    try {
+      const payload = buildOrganizationPayload(input);
+      const response = await callPipedriveApi('POST', '/api/v2/organizations', payload);
+      const createdOrganization = response.data ?? response;
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Created organization ${createdOrganization?.id ?? 'unknown'}`,
+            data: createdOrganization
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error("Error creating organization:", error);
+      return {
+        content: [{
+          type: "text",
+          text: `Error creating organization: ${getErrorMessage(error)}`
+        }],
+        isError: true
+      };
+    }
+  }
+);
+
+const addNoteHandler = async (input: CreateNoteToolInput) => {
+  try {
+    const payload = buildNotePayload(input);
+    const response = await callPipedriveApi('POST', '/api/v1/notes', payload);
+    const createdNote = response.data ?? response;
+
+    return createTextToolResult(JSON.stringify({
+      summary: `Created note ${createdNote?.id ?? 'unknown'}`,
+      data: createdNote
+    }, null, 2));
+  } catch (error) {
+    console.error("Error creating note:", error);
+    return createTextToolErrorResult(`Error creating note: ${getErrorMessage(error)}`);
+  }
+};
+
+// Add a note
+server.tool(
+  "add-note",
+  "Add a note to a deal, person, organization, or lead. Content should be HTML or plain text.",
+  {
+    content: z.string().describe("Note content (HTML or plain text)"),
+    dealId: z.number().optional().describe("Deal ID to attach the note to"),
+    personId: z.number().optional().describe("Person ID to attach the note to"),
+    organizationId: z.number().optional().describe("Organization ID to attach the note to"),
+    leadId: z.string().optional().describe("Lead UUID to attach the note to"),
+    userId: z.number().optional().describe("Author user ID"),
+    addTime: z.string().optional().describe("Optional creation timestamp in YYYY-MM-DD HH:MM:SS"),
+    pinnedToDeal: z.boolean().optional().describe("Pin the note to the deal"),
+    pinnedToPerson: z.boolean().optional().describe("Pin the note to the person"),
+    pinnedToOrganization: z.boolean().optional().describe("Pin the note to the organization"),
+    pinnedToLead: z.boolean().optional().describe("Pin the note to the lead")
+  },
+  addNoteHandler
+);
+
+// Alias for add-note
+server.tool(
+  "create-note",
+  "Create a note attached to a deal, person, organization, or lead. Content should be HTML or plain text.",
+  {
+    content: z.string().describe("Note content (HTML or plain text)"),
+    dealId: z.number().optional().describe("Deal ID to attach the note to"),
+    personId: z.number().optional().describe("Person ID to attach the note to"),
+    organizationId: z.number().optional().describe("Organization ID to attach the note to"),
+    leadId: z.string().optional().describe("Lead UUID to attach the note to"),
+    userId: z.number().optional().describe("Author user ID"),
+    addTime: z.string().optional().describe("Optional creation timestamp in YYYY-MM-DD HH:MM:SS"),
+    pinnedToDeal: z.boolean().optional().describe("Pin the note to the deal"),
+    pinnedToPerson: z.boolean().optional().describe("Pin the note to the person"),
+    pinnedToOrganization: z.boolean().optional().describe("Pin the note to the organization"),
+    pinnedToLead: z.boolean().optional().describe("Pin the note to the lead")
+  },
+  addNoteHandler
+);
+
+// Create a new activity
+server.tool(
+  "create-activity",
+  "Create a Pipedrive activity/task/reminder for a deal, person, organization, or lead.",
+  {
+    subject: z.string().describe("Activity subject"),
+    type: z.string().optional().describe("Activity type key, e.g. task, meeting, call, lunch"),
+    ownerId: z.number().optional().describe("Owner/user ID"),
+    dealId: z.number().optional().describe("Linked deal ID"),
+    personId: z.number().optional().describe("Linked person ID"),
+    organizationId: z.number().optional().describe("Linked organization ID"),
+    leadId: z.string().optional().describe("Linked lead UUID"),
+    dueDate: z.string().optional().describe("Due date in YYYY-MM-DD"),
+    dueTime: z.string().optional().describe("Due time in HH:MM"),
+    duration: z.string().optional().describe("Duration in HH:MM or HH:MM:SS"),
+    busy: z.boolean().optional().describe("Whether this marks the assignee as busy"),
+    done: z.boolean().optional().describe("Whether the activity is already completed"),
+    note: z.string().optional().describe("Internal note for the activity"),
+    publicDescription: z.string().optional().describe("Public description visible to guests"),
+    priority: z.number().optional().describe("Priority value")
+  },
+  async (input: CreateActivityToolInput) => {
+    try {
+      const payload = buildActivityPayload(input);
+      const response = await callPipedriveApi('POST', '/api/v2/activities', payload);
+      const createdActivity = response.data ?? response;
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            summary: `Created activity ${createdActivity?.id ?? 'unknown'}`,
+            data: createdActivity
+          }, null, 2)
+        }]
+      };
+    } catch (error) {
+      console.error("Error creating activity:", error);
+      return {
+        content: [{
+          type: "text",
+          text: `Error creating activity: ${getErrorMessage(error)}`
         }],
         isError: true
       };

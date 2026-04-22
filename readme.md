@@ -170,6 +170,12 @@ To use this server with Claude for Desktop:
 - `get-deal`: Get a specific deal by ID (including custom fields)
 - `update-deal`: Update an existing deal, including custom fields via JSON input, but cannot change stage
 - `create-deal`: Create a new deal, including custom fields via JSON input, but cannot set stage
+- `create-person`: Create a new person/contact
+- `update-person`: Update an existing person/contact
+- `create-organization`: Create a new organization/company
+- `add-note`: Add a note to a deal, person, organization, or lead
+- `create-note`: Alias for adding a note
+- `create-activity`: Create an activity/task/reminder
 - `get-deal-notes`: Get detailed notes and custom booking details for a specific deal
 - `search-deals`: Search deals by term
 - `get-persons`: Get all persons from Pipedrive (including custom fields)
