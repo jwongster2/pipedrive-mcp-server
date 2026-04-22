@@ -105,6 +105,14 @@ interface DealMutationInput {
   clearFields?: string[];
 }
 
+interface UpdateDealToolInput extends DealMutationInput {
+  dealId: number;
+}
+
+interface CreateDealToolInput extends DealMutationInput {
+  title: string;
+}
+
 const FORBIDDEN_DEAL_FIELDS = new Set(['stage_id', 'stageId']);
 
 const parseOptionalJsonObject = (value: string | undefined, fieldName: string): Record<string, unknown> => {
@@ -507,34 +515,26 @@ server.tool(
 );
 
 // Update an existing deal
-server.registerTool(
+server.tool(
   "update-deal",
+  "Update an existing Pipedrive deal. Supports common deal fields directly and custom fields via JSON objects.",
   {
-    description: "Update an existing Pipedrive deal. Supports common deal fields directly and custom fields via JSON objects.",
-    inputSchema: {
-      dealId: z.number().describe("Pipedrive deal ID"),
-      title: z.string().optional().describe("Updated deal title"),
-      value: z.number().optional().describe("Updated deal value"),
-      currency: z.string().optional().describe("Updated currency code such as EUR or USD"),
-      status: z.enum(['open', 'won', 'lost']).optional().describe("Updated deal status"),
-      ownerId: z.number().nullable().optional().describe("Updated owner/user ID, or null to clear if allowed"),
-      personId: z.number().nullable().optional().describe("Updated linked person ID, or null to unlink"),
-      organizationId: z.number().nullable().optional().describe("Updated linked organization ID, or null to unlink"),
-      expectedCloseDate: z.string().nullable().optional().describe("Updated expected close date in YYYY-MM-DD format"),
-      probability: z.number().min(0).max(100).nullable().optional().describe("Updated probability from 0 to 100"),
-      visibleTo: z.number().optional().describe("Updated visibility setting"),
-      customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values, e.g. {"8f4...":"New value"}'),
-      additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive deal fields to update, excluding stage_id'),
-      clearFields: z.array(z.string()).optional().describe("Field keys to explicitly clear by setting them to null, excluding stage_id")
-    },
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: true
-    }
+    dealId: z.number().describe("Pipedrive deal ID"),
+    title: z.string().optional().describe("Updated deal title"),
+    value: z.number().optional().describe("Updated deal value"),
+    currency: z.string().optional().describe("Updated currency code such as EUR or USD"),
+    status: z.enum(['open', 'won', 'lost']).optional().describe("Updated deal status"),
+    ownerId: z.number().nullable().optional().describe("Updated owner/user ID, or null to clear if allowed"),
+    personId: z.number().nullable().optional().describe("Updated linked person ID, or null to unlink"),
+    organizationId: z.number().nullable().optional().describe("Updated linked organization ID, or null to unlink"),
+    expectedCloseDate: z.string().nullable().optional().describe("Updated expected close date in YYYY-MM-DD format"),
+    probability: z.number().min(0).max(100).nullable().optional().describe("Updated probability from 0 to 100"),
+    visibleTo: z.number().optional().describe("Updated visibility setting"),
+    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values, e.g. {"8f4...":"New value"}'),
+    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive deal fields to update, excluding stage_id'),
+    clearFields: z.array(z.string()).optional().describe("Field keys to explicitly clear by setting them to null, excluding stage_id")
   },
-  async ({ dealId, ...input }) => {
+  async ({ dealId, ...input }: UpdateDealToolInput) => {
     try {
       const payload = buildDealPayload(input);
 
@@ -574,33 +574,25 @@ server.registerTool(
 );
 
 // Create a new deal
-server.registerTool(
+server.tool(
   "create-deal",
+  "Create a new Pipedrive deal. Supports common deal fields directly and custom fields via JSON objects.",
   {
-    description: "Create a new Pipedrive deal. Supports common deal fields directly and custom fields via JSON objects.",
-    inputSchema: {
-      title: z.string().describe("Deal title"),
-      value: z.number().optional().describe("Deal value"),
-      currency: z.string().optional().describe("Currency code such as EUR or USD"),
-      status: z.enum(['open', 'won', 'lost']).optional().describe("Initial deal status"),
-      ownerId: z.number().nullable().optional().describe("Owner/user ID"),
-      personId: z.number().nullable().optional().describe("Linked person ID"),
-      organizationId: z.number().nullable().optional().describe("Linked organization ID"),
-      expectedCloseDate: z.string().nullable().optional().describe("Expected close date in YYYY-MM-DD format"),
-      probability: z.number().min(0).max(100).nullable().optional().describe("Probability from 0 to 100"),
-      visibleTo: z.number().optional().describe("Visibility setting"),
-      customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values, e.g. {"8f4...":"New value"}'),
-      additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive deal fields to set, excluding stage_id'),
-      clearFields: z.array(z.string()).optional().describe("Field keys to set to null as part of creation, excluding stage_id")
-    },
-    annotations: {
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: true
-    }
+    title: z.string().describe("Deal title"),
+    value: z.number().optional().describe("Deal value"),
+    currency: z.string().optional().describe("Currency code such as EUR or USD"),
+    status: z.enum(['open', 'won', 'lost']).optional().describe("Initial deal status"),
+    ownerId: z.number().nullable().optional().describe("Owner/user ID"),
+    personId: z.number().nullable().optional().describe("Linked person ID"),
+    organizationId: z.number().nullable().optional().describe("Linked organization ID"),
+    expectedCloseDate: z.string().nullable().optional().describe("Expected close date in YYYY-MM-DD format"),
+    probability: z.number().min(0).max(100).nullable().optional().describe("Probability from 0 to 100"),
+    visibleTo: z.number().optional().describe("Visibility setting"),
+    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values, e.g. {"8f4...":"New value"}'),
+    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive deal fields to set, excluding stage_id'),
+    clearFields: z.array(z.string()).optional().describe("Field keys to set to null as part of creation, excluding stage_id")
   },
-  async (input) => {
+  async (input: CreateDealToolInput) => {
     try {
       const payload = buildDealPayload(input);
       const response = await callPipedriveApi('POST', '/api/v2/deals', payload);
