@@ -2,23 +2,21 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { z } from "zod";
-import * as pipedrive from "pipedrive";
-import * as dotenv from 'dotenv';
-import Bottleneck from 'bottleneck';
-import jwt from 'jsonwebtoken';
-import http from 'http';
+import * as dotenv from "dotenv";
+import Bottleneck from "bottleneck";
+import jwt from "jsonwebtoken";
+import http from "http";
 
-// Type for error handling
 interface ErrorWithMessage {
   message: string;
 }
 
 function isErrorWithMessage(error: unknown): error is ErrorWithMessage {
   return (
-    typeof error === 'object' &&
+    typeof error === "object" &&
     error !== null &&
-    'message' in error &&
-    typeof (error as Record<string, unknown>).message === 'string'
+    "message" in error &&
+    typeof (error as Record<string, unknown>).message === "string"
   );
 }
 
@@ -29,22 +27,18 @@ function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
-// Load environment variables
 dotenv.config();
 
-// Check for required environment variables
-if (!process.env.PIPEDRIVE_API_TOKEN) {
-  console.error("ERROR: PIPEDRIVE_API_TOKEN environment variable is required");
+if (!process.env.WIZA_API_KEY) {
+  console.error("ERROR: WIZA_API_KEY environment variable is required");
   process.exit(1);
 }
 
-if (!process.env.PIPEDRIVE_DOMAIN) {
-  console.error("ERROR: PIPEDRIVE_DOMAIN environment variable is required (e.g., 'ukkofi.pipedrive.com')");
-  process.exit(1);
-}
+const WIZA_API_KEY = process.env.WIZA_API_KEY;
+const WIZA_BASE_URL = process.env.WIZA_BASE_URL || "https://wiza.co";
 
 const jwtSecret = process.env.MCP_JWT_SECRET;
-const jwtAlgorithm = (process.env.MCP_JWT_ALGORITHM || 'HS256') as jwt.Algorithm;
+const jwtAlgorithm = (process.env.MCP_JWT_ALGORITHM || "HS256") as jwt.Algorithm;
 const jwtVerifyOptions = {
   algorithms: [jwtAlgorithm],
   audience: process.env.MCP_JWT_AUDIENCE,
@@ -71,1680 +65,731 @@ const verifyRequestAuthentication = (req: http.IncomingMessage) => {
     return { ok: true } as const;
   }
 
-  const header = req.headers['authorization'];
+  const header = req.headers["authorization"];
   if (!header) {
-    return { ok: false, status: 401, message: 'Missing Authorization header' } as const;
+    return { ok: false, status: 401, message: "Missing Authorization header" } as const;
   }
 
-  const [scheme, token] = header.split(' ');
-  if (scheme !== 'Bearer' || !token) {
-    return { ok: false, status: 401, message: 'Invalid Authorization header format' } as const;
+  const [scheme, token] = header.split(" ");
+  if (scheme !== "Bearer" || !token) {
+    return { ok: false, status: 401, message: "Invalid Authorization header format" } as const;
   }
 
   try {
     jwt.verify(token, jwtSecret, jwtVerifyOptions);
     return { ok: true } as const;
   } catch (error) {
-    return { ok: false, status: 401, message: 'Invalid or expired token' } as const;
+    return { ok: false, status: 401, message: "Invalid or expired token" } as const;
   }
 };
 
-interface DealMutationInput {
-  title?: string;
-  value?: number;
-  currency?: string;
-  status?: 'open' | 'won' | 'lost';
-  ownerId?: number | null;
-  personId?: number | null;
-  organizationId?: number | null;
-  expectedCloseDate?: string | null;
-  probability?: number | null;
-  visibleTo?: number;
-  customFieldsJson?: string;
-  additionalFieldsJson?: string;
-  clearFields?: string[];
+// Wiza's documented limit on company_enrichments is 30 req/min. Stay conservative across endpoints.
+const limiter = new Bottleneck({
+  minTime: Number(process.env.WIZA_RATE_LIMIT_MIN_TIME_MS || 1000),
+  maxConcurrent: Number(process.env.WIZA_RATE_LIMIT_MAX_CONCURRENT || 2),
+});
+
+type WizaMethod = "GET" | "POST";
+
+interface WizaRequestOptions {
+  method: WizaMethod;
+  path: string;
+  body?: Record<string, unknown>;
+  query?: Record<string, string | number | undefined>;
 }
 
-interface UpdateDealToolInput extends DealMutationInput {
-  dealId: number;
-}
-
-interface CreateDealToolInput extends DealMutationInput {
-  title: string;
-}
-
-interface PersonMutationInput {
-  name?: string;
-  ownerId?: number | null;
-  organizationId?: number | null;
-  email?: string | null;
-  phone?: string | null;
-  emailsJson?: string;
-  phonesJson?: string;
-  visibleTo?: number;
-  customFieldsJson?: string;
-  additionalFieldsJson?: string;
-  clearFields?: string[];
-}
-
-interface CreatePersonToolInput extends PersonMutationInput {
-  name: string;
-}
-
-interface UpdatePersonToolInput extends PersonMutationInput {
-  personId: number;
-}
-
-interface OrganizationMutationInput {
-  name?: string;
-  ownerId?: number | null;
-  visibleTo?: number;
-  address?: string | null;
-  country?: string | null;
-  locality?: string | null;
-  customFieldsJson?: string;
-  additionalFieldsJson?: string;
-  clearFields?: string[];
-}
-
-interface CreateOrganizationToolInput extends OrganizationMutationInput {
-  name: string;
-}
-
-interface CreateNoteToolInput {
-  content: string;
-  dealId?: number;
-  personId?: number;
-  organizationId?: number;
-  leadId?: string;
-  userId?: number;
-  addTime?: string;
-  pinnedToDeal?: boolean;
-  pinnedToPerson?: boolean;
-  pinnedToOrganization?: boolean;
-  pinnedToLead?: boolean;
-}
-
-interface CreateActivityToolInput {
-  subject: string;
-  type?: string;
-  ownerId?: number;
-  dealId?: number;
-  personId?: number;
-  organizationId?: number;
-  leadId?: string;
-  dueDate?: string;
-  dueTime?: string;
-  duration?: string;
-  busy?: boolean;
-  done?: boolean;
-  note?: string;
-  publicDescription?: string;
-  priority?: number;
-}
-
-const FORBIDDEN_DEAL_FIELDS = new Set(['stage_id', 'stageId']);
-
-const parseOptionalJsonObject = (value: string | undefined, fieldName: string): Record<string, unknown> => {
-  if (!value) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(value);
-
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      throw new Error(`${fieldName} must be a JSON object`);
-    }
-
-    return parsed as Record<string, unknown>;
-  } catch (error) {
-    throw new Error(`Invalid ${fieldName}: ${getErrorMessage(error)}`);
-  }
-};
-
-const parseOptionalJsonArray = (value: string | undefined, fieldName: string): unknown[] | undefined => {
-  if (!value) {
-    return undefined;
-  }
-
-  try {
-    const parsed = JSON.parse(value);
-
-    if (!Array.isArray(parsed)) {
-      throw new Error(`${fieldName} must be a JSON array`);
-    }
-
-    return parsed;
-  } catch (error) {
-    throw new Error(`Invalid ${fieldName}: ${getErrorMessage(error)}`);
-  }
-};
-
-const assertNoForbiddenDealFields = (fields: Iterable<string>, source: string) => {
-  for (const field of fields) {
-    if (FORBIDDEN_DEAL_FIELDS.has(field)) {
-      throw new Error(`Updating deal stage is not allowed via ${source}`);
+const callWizaApi = async <T = any>({
+  method,
+  path,
+  body,
+  query,
+}: WizaRequestOptions): Promise<T> => {
+  const url = new URL(`${WIZA_BASE_URL}${path}`);
+  if (query) {
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined && value !== null) {
+        url.searchParams.set(key, String(value));
+      }
     }
   }
-};
 
-const buildPipedriveUrl = (path: string) => {
-  const url = new URL(`https://${process.env.PIPEDRIVE_DOMAIN!}${path}`);
-  url.searchParams.set('api_token', process.env.PIPEDRIVE_API_TOKEN!);
-  return url;
-};
+  const init: RequestInit = {
+    method,
+    headers: {
+      Authorization: `Bearer ${WIZA_API_KEY}`,
+      Accept: "application/json",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  };
 
-const callPipedriveApi = async (
-  method: 'POST' | 'PATCH',
-  path: string,
-  body: Record<string, unknown>
-) => {
-  const response = await limiter.schedule(() =>
-    fetch(buildPipedriveUrl(path), {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    })
-  );
-
+  const response = await limiter.schedule(() => fetch(url, init));
   const rawBody = await response.text();
-  const parsedBody = rawBody ? JSON.parse(rawBody) as any : null;
+  const parsedBody = rawBody ? (() => {
+    try {
+      return JSON.parse(rawBody);
+    } catch {
+      return rawBody;
+    }
+  })() : null;
 
   if (!response.ok) {
-    const apiError =
-      typeof parsedBody?.error === 'string'
-        ? parsedBody.error
-        : typeof parsedBody?.message === 'string'
-          ? parsedBody.message
+    const apiMessage =
+      typeof parsedBody === "object" && parsedBody !== null
+        ? (parsedBody as any).status?.message ||
+          (parsedBody as any).message ||
+          (parsedBody as any).error ||
+          response.statusText
+        : typeof parsedBody === "string" && parsedBody
+          ? parsedBody
           : response.statusText;
 
-    throw new Error(`Pipedrive API request failed (${response.status}): ${apiError}`);
+    throw new Error(`Wiza API request failed (${response.status}): ${apiMessage}`);
   }
 
-  return parsedBody;
+  return parsedBody as T;
 };
 
-const buildDealPayload = ({
-  title,
-  value,
-  currency,
-  status,
-  ownerId,
-  personId,
-  organizationId,
-  expectedCloseDate,
-  probability,
-  visibleTo,
-  customFieldsJson,
-  additionalFieldsJson,
-  clearFields = [],
-}: DealMutationInput) => {
-  const additionalFields = parseOptionalJsonObject(additionalFieldsJson, 'additionalFieldsJson');
-  const customFields = parseOptionalJsonObject(customFieldsJson, 'customFieldsJson');
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-  assertNoForbiddenDealFields(Object.keys(additionalFields), 'additionalFieldsJson');
-  assertNoForbiddenDealFields(clearFields, 'clearFields');
+interface IndividualRevealData {
+  id: number;
+  status: "queued" | "resolving" | "finished" | "failed";
+  is_complete: boolean;
+  [key: string]: unknown;
+}
 
-  const payload: Record<string, unknown> = {
-    ...additionalFields,
-    ...customFields,
-  };
+interface IndividualRevealResponse {
+  status?: { code?: number; message?: string };
+  type?: string;
+  data: IndividualRevealData;
+}
 
-  if (title !== undefined) payload.title = title;
-  if (value !== undefined) payload.value = value;
-  if (currency !== undefined) payload.currency = currency;
-  if (status !== undefined) payload.status = status;
-  if (ownerId !== undefined) payload.owner_id = ownerId;
-  if (personId !== undefined) payload.person_id = personId;
-  if (organizationId !== undefined) payload.org_id = organizationId;
-  if (expectedCloseDate !== undefined) payload.expected_close_date = expectedCloseDate;
-  if (probability !== undefined) payload.probability = probability;
-  if (visibleTo !== undefined) payload.visible_to = visibleTo;
+const TERMINAL_STATUSES = new Set(["finished", "failed"]);
 
-  for (const fieldName of clearFields) {
-    payload[fieldName] = null;
+const pollIndividualReveal = async (
+  id: number,
+  timeoutMs: number,
+  pollIntervalMs: number
+): Promise<IndividualRevealResponse> => {
+  const startedAt = Date.now();
+  let attempt = 0;
+
+  while (true) {
+    attempt += 1;
+    const response = await callWizaApi<IndividualRevealResponse>({
+      method: "GET",
+      path: `/api/individual_reveals/${id}`,
+    });
+
+    const status = response.data?.status;
+    if (status && TERMINAL_STATUSES.has(status)) {
+      return response;
+    }
+
+    if (Date.now() - startedAt + pollIntervalMs > timeoutMs) {
+      // Return the latest snapshot if we've exhausted the budget.
+      return response;
+    }
+
+    // Light backoff: start at pollIntervalMs and grow up to ~5s.
+    const wait = Math.min(pollIntervalMs * Math.min(attempt, 5), 5000);
+    await sleep(wait);
   }
-
-  return payload;
 };
 
-const buildPersonPayload = ({
-  name,
-  ownerId,
-  organizationId,
-  email,
-  phone,
-  emailsJson,
-  phonesJson,
-  visibleTo,
-  customFieldsJson,
-  additionalFieldsJson,
-  clearFields = [],
-}: PersonMutationInput) => {
-  const additionalFields = parseOptionalJsonObject(additionalFieldsJson, 'additionalFieldsJson');
-  const customFields = parseOptionalJsonObject(customFieldsJson, 'customFieldsJson');
-  const emails = parseOptionalJsonArray(emailsJson, 'emailsJson');
-  const phones = parseOptionalJsonArray(phonesJson, 'phonesJson');
-
-  const payload: Record<string, unknown> = {
-    ...additionalFields,
-    ...customFields,
-  };
-
-  if (name !== undefined) payload.name = name;
-  if (ownerId !== undefined) payload.owner_id = ownerId;
-  if (organizationId !== undefined) payload.org_id = organizationId;
-  if (visibleTo !== undefined) payload.visible_to = visibleTo;
-
-  if (emails !== undefined) {
-    payload.emails = emails;
-  } else if (email !== undefined) {
-    payload.emails = email === null ? [] : [{ value: email, primary: true, label: 'work' }];
-  }
-
-  if (phones !== undefined) {
-    payload.phones = phones;
-  } else if (phone !== undefined) {
-    payload.phones = phone === null ? [] : [{ value: phone, primary: true, label: 'work' }];
-  }
-
-  for (const fieldName of clearFields) {
-    payload[fieldName] = null;
-  }
-
-  return payload;
-};
-
-const buildOrganizationPayload = ({
-  name,
-  ownerId,
-  visibleTo,
-  address,
-  country,
-  locality,
-  customFieldsJson,
-  additionalFieldsJson,
-  clearFields = [],
-}: OrganizationMutationInput) => {
-  const additionalFields = parseOptionalJsonObject(additionalFieldsJson, 'additionalFieldsJson');
-  const customFields = parseOptionalJsonObject(customFieldsJson, 'customFieldsJson');
-
-  const payload: Record<string, unknown> = {
-    ...additionalFields,
-    ...customFields,
-  };
-
-  if (name !== undefined) payload.name = name;
-  if (ownerId !== undefined) payload.owner_id = ownerId;
-  if (visibleTo !== undefined) payload.visible_to = visibleTo;
-  if (address !== undefined) payload.address = address;
-  if (country !== undefined) payload.country = country;
-  if (locality !== undefined) payload.locality = locality;
-
-  for (const fieldName of clearFields) {
-    payload[fieldName] = null;
-  }
-
-  return payload;
-};
-
-const buildNotePayload = ({
-  content,
-  dealId,
-  personId,
-  organizationId,
-  leadId,
-  userId,
-  addTime,
-  pinnedToDeal,
-  pinnedToPerson,
-  pinnedToOrganization,
-  pinnedToLead,
-}: CreateNoteToolInput) => {
-  if (
-    dealId === undefined &&
-    personId === undefined &&
-    organizationId === undefined &&
-    leadId === undefined
-  ) {
-    throw new Error('A note must be attached to at least one deal, person, organization, or lead');
-  }
-
-  const payload: Record<string, unknown> = {
-    content,
-  };
-
-  if (dealId !== undefined) payload.deal_id = dealId;
-  if (personId !== undefined) payload.person_id = personId;
-  if (organizationId !== undefined) payload.org_id = organizationId;
-  if (leadId !== undefined) payload.lead_id = leadId;
-  if (userId !== undefined) payload.user_id = userId;
-  if (addTime !== undefined) payload.add_time = addTime;
-  if (pinnedToDeal !== undefined) payload.pinned_to_deal_flag = Number(pinnedToDeal);
-  if (pinnedToPerson !== undefined) payload.pinned_to_person_flag = Number(pinnedToPerson);
-  if (pinnedToOrganization !== undefined) payload.pinned_to_organization_flag = Number(pinnedToOrganization);
-  if (pinnedToLead !== undefined) payload.pinned_to_lead_flag = Number(pinnedToLead);
-
-  return payload;
-};
-
-const buildActivityPayload = ({
-  subject,
-  type = 'task',
-  ownerId,
-  dealId,
-  personId,
-  organizationId,
-  leadId,
-  dueDate,
-  dueTime,
-  duration,
-  busy,
-  done,
-  note,
-  publicDescription,
-  priority,
-}: CreateActivityToolInput) => {
-  const payload: Record<string, unknown> = {
-    subject,
-    type,
-  };
-
-  if (ownerId !== undefined) payload.owner_id = ownerId;
-  if (dealId !== undefined) payload.deal_id = dealId;
-  if (personId !== undefined) payload.person_id = personId;
-  if (organizationId !== undefined) payload.org_id = organizationId;
-  if (leadId !== undefined) payload.lead_id = leadId;
-  if (dueDate !== undefined) payload.due_date = dueDate;
-  if (dueTime !== undefined) payload.due_time = dueTime;
-  if (duration !== undefined) payload.duration = duration;
-  if (busy !== undefined) payload.busy = busy;
-  if (done !== undefined) payload.done = done;
-  if (note !== undefined) payload.note = note;
-  if (publicDescription !== undefined) payload.public_description = publicDescription;
-  if (priority !== undefined) payload.priority = priority;
-
-  return payload;
-};
-
-const createTextToolResult = (text: string) => ({
-  content: [{
-    type: "text" as const,
-    text
-  }]
+const createTextToolResult = (payload: unknown) => ({
+  content: [
+    {
+      type: "text" as const,
+      text: typeof payload === "string" ? payload : JSON.stringify(payload, null, 2),
+    },
+  ],
 });
 
 const createTextToolErrorResult = (text: string) => ({
-  content: [{
-    type: "text" as const,
-    text
-  }],
-  isError: true
-});
-
-const limiter = new Bottleneck({
-  minTime: Number(process.env.PIPEDRIVE_RATE_LIMIT_MIN_TIME_MS || 250),
-  maxConcurrent: Number(process.env.PIPEDRIVE_RATE_LIMIT_MAX_CONCURRENT || 2),
-});
-
-const withRateLimit = <T extends object>(client: T): T => {
-  return new Proxy(client, {
-    get(target, prop, receiver) {
-      const value = Reflect.get(target, prop, receiver);
-      if (typeof value === 'function') {
-        return (...args: unknown[]) => limiter.schedule(() => (value as Function).apply(target, args));
-      }
-      return value;
+  content: [
+    {
+      type: "text" as const,
+      text,
     },
-  });
-};
+  ],
+  isError: true,
+});
 
-// Initialize Pipedrive API client with API token and custom domain
-const apiClient = new pipedrive.ApiClient();
-apiClient.basePath = `https://${process.env.PIPEDRIVE_DOMAIN}/api/v1`;
-apiClient.authentications = apiClient.authentications || {};
-apiClient.authentications['api_key'] = {
-  type: 'apiKey',
-  'in': 'query',
-  name: 'api_token',
-  apiKey: process.env.PIPEDRIVE_API_TOKEN
-};
-
-// Initialize Pipedrive API clients
-const dealsApi = withRateLimit(new pipedrive.DealsApi(apiClient));
-const personsApi = withRateLimit(new pipedrive.PersonsApi(apiClient));
-const organizationsApi = withRateLimit(new pipedrive.OrganizationsApi(apiClient));
-const pipelinesApi = withRateLimit(new pipedrive.PipelinesApi(apiClient));
-const itemSearchApi = withRateLimit(new pipedrive.ItemSearchApi(apiClient));
-const leadsApi = withRateLimit(new pipedrive.LeadsApi(apiClient));
-// @ts-ignore - ActivitiesApi exists but may not be in type definitions
-const activitiesApi = withRateLimit(new pipedrive.ActivitiesApi(apiClient));
-// @ts-ignore - NotesApi exists but may not be in type definitions
-const notesApi = withRateLimit(new pipedrive.NotesApi(apiClient));
-// @ts-ignore - UsersApi exists but may not be in type definitions
-const usersApi = withRateLimit(new pipedrive.UsersApi(apiClient));
-
-// Create MCP server
 const server = new McpServer({
-  name: "pipedrive-mcp-server",
-  version: "1.0.4"
+  name: "wiza-mcp-server",
+  version: "1.0.0",
 });
 
 // === TOOLS ===
 
-// Get all users (for finding owner IDs)
 server.tool(
-  "get-users",
-  "Get all users/owners from Pipedrive to identify owner IDs for filtering deals",
+  "get-credits",
+  "Check the remaining email, phone, export, and API credits on the Wiza account.",
   {},
   async () => {
     try {
-      const response = await usersApi.getUsers();
-      const users = response.data?.map((user: any) => ({
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        active_flag: user.active_flag,
-        role_name: user.role_name
-      })) || [];
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            summary: `Found ${users.length} users in your Pipedrive account`,
-            users: users
-          }, null, 2)
-        }]
-      };
+      const response = await callWizaApi<{ credits: Record<string, unknown> }>({
+        method: "GET",
+        path: "/api/meta/credits",
+      });
+      return createTextToolResult({
+        summary: "Wiza credit balance retrieved",
+        credits: response.credits,
+      });
     } catch (error) {
-      console.error("Error fetching users:", error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error fetching users: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
+      console.error("Error fetching Wiza credits:", error);
+      return createTextToolErrorResult(`Error fetching Wiza credits: ${getErrorMessage(error)}`);
     }
   }
 );
 
-// Get deals with flexible filtering options
+const enrichmentLevelSchema = z
+  .enum(["none", "partial", "phone", "full"])
+  .describe(
+    "Enrichment depth: 'none' (only profile data, no email/phone lookup), 'partial' (find email), 'phone' (find phone numbers), 'full' (email + phone)."
+  );
+
 server.tool(
-  "get-deals",
-  "Get deals from Pipedrive with flexible filtering options including search by title, date range, owner, stage, status, and more. Use 'get-users' tool first to find owner IDs.",
+  "enrich-contact",
+  "Enrich a single contact via Wiza. Provide ONE of: a LinkedIn profile URL, an email address, OR a full name plus company name or company domain. Defaults to waiting for the enrichment to complete and returning the resolved contact data including email, phone, title, location, and company details.",
   {
-    searchTitle: z.string().optional().describe("Search deals by title/name (partial matches supported)"),
-    daysBack: z.number().optional().describe("Number of days back to fetch deals based on last activity date (default: 365)"),
-    ownerId: z.number().optional().describe("Filter deals by owner/user ID (use get-users tool to find IDs)"),
-    stageId: z.number().optional().describe("Filter deals by stage ID"),
-    status: z.enum(['open', 'won', 'lost', 'deleted']).optional().describe("Filter deals by status (default: open)"),
-    pipelineId: z.number().optional().describe("Filter deals by pipeline ID"),
-    minValue: z.number().optional().describe("Minimum deal value filter"),
-    maxValue: z.number().optional().describe("Maximum deal value filter"),
-    limit: z.number().optional().describe("Maximum number of deals to return (default: 500)")
+    profileUrl: z
+      .string()
+      .url()
+      .optional()
+      .describe("LinkedIn profile URL, e.g. https://www.linkedin.com/in/stephen-hakami-5babb21b0/"),
+    email: z.string().email().optional().describe("Email address of the contact"),
+    fullName: z.string().optional().describe("Full name of the contact, e.g. 'Stephen Hakami'"),
+    company: z.string().optional().describe("Company name (required with fullName if domain is not provided)"),
+    domain: z.string().optional().describe("Company domain, e.g. 'wiza.co' (required with fullName if company is not provided)"),
+    enrichmentLevel: enrichmentLevelSchema.default("full"),
+    acceptWork: z.boolean().optional().describe("Accept professional emails (e.g. tim@apple.com). Defaults to true."),
+    acceptPersonal: z.boolean().optional().describe("Accept personal emails (e.g. tim@gmail.com). Defaults to false."),
+    waitForCompletion: z
+      .boolean()
+      .optional()
+      .describe("If true (default), poll until the reveal finishes or times out and return the final data. If false, return immediately with the queued reveal id."),
+    timeoutSeconds: z.number().int().positive().max(600).optional().describe("Maximum seconds to wait when waitForCompletion is true. Default 120."),
+    pollIntervalSeconds: z.number().min(1).max(30).optional().describe("Polling interval seconds while waiting. Default 3."),
+    callbackUrl: z.string().url().optional().describe("Optional webhook URL for async completion notification"),
   },
   async ({
-    searchTitle,
-    daysBack = 365,
-    ownerId,
-    stageId,
-    status = 'open',
-    pipelineId,
-    minValue,
-    maxValue,
-    limit = 500
+    profileUrl,
+    email,
+    fullName,
+    company,
+    domain,
+    enrichmentLevel = "full",
+    acceptWork,
+    acceptPersonal,
+    waitForCompletion = true,
+    timeoutSeconds = 120,
+    pollIntervalSeconds = 3,
+    callbackUrl,
   }) => {
     try {
-      let filteredDeals: any[] = [];
+      let individualReveal: Record<string, unknown>;
 
-      // If searching by title, use the search API first
-      if (searchTitle) {
-        // @ts-ignore - Bypass incorrect TypeScript definition
-        const searchResponse = await dealsApi.searchDeals(searchTitle);
-        filteredDeals = searchResponse.data || [];
+      if (profileUrl) {
+        individualReveal = { profile_url: profileUrl };
+      } else if (fullName) {
+        if (!company && !domain) {
+          return createTextToolErrorResult(
+            "When using fullName, you must also provide either 'company' or 'domain'."
+          );
+        }
+        individualReveal = { full_name: fullName };
+        if (company) individualReveal.company = company;
+        if (domain) individualReveal.domain = domain;
+      } else if (email) {
+        individualReveal = { email };
       } else {
-        // Calculate the date filter (daysBack days ago)
-        const filterDate = new Date();
-        filterDate.setDate(filterDate.getDate() - daysBack);
-        const startDate = filterDate.toISOString().split('T')[0]; // Format as YYYY-MM-DD
-
-        // Build API parameters (using actual Pipedrive API parameter names)
-        const params: any = {
-          sort: 'last_activity_date DESC',
-          status: status,
-          limit: limit
-        };
-
-        // Add optional filters
-        if (ownerId) params.user_id = ownerId;
-        if (stageId) params.stage_id = stageId;
-        if (pipelineId) params.pipeline_id = pipelineId;
-
-        // Fetch deals with filters
-        // @ts-ignore - getDeals accepts parameters but types may be incomplete
-        const response = await dealsApi.getDeals(params);
-        filteredDeals = response.data || [];
+        return createTextToolErrorResult(
+          "Provide one of: profileUrl, email, or fullName (with company or domain)."
+        );
       }
 
-      // Apply additional client-side filtering
-
-      // Filter by date if not searching by title
-      if (!searchTitle) {
-        const filterDate = new Date();
-        filterDate.setDate(filterDate.getDate() - daysBack);
-
-        filteredDeals = filteredDeals.filter((deal: any) => {
-          if (!deal.last_activity_date) return false;
-          const dealActivityDate = new Date(deal.last_activity_date);
-          return dealActivityDate >= filterDate;
-        });
-      }
-
-      // Filter by owner if specified and not already applied in API call
-      if (ownerId && searchTitle) {
-        filteredDeals = filteredDeals.filter((deal: any) => deal.owner_id === ownerId);
-      }
-
-      // Filter by status if specified and searching by title
-      if (status && searchTitle) {
-        filteredDeals = filteredDeals.filter((deal: any) => deal.status === status);
-      }
-
-      // Filter by stage if specified and not already applied in API call
-      if (stageId && (searchTitle || !stageId)) {
-        filteredDeals = filteredDeals.filter((deal: any) => deal.stage_id === stageId);
-      }
-
-      // Filter by pipeline if specified and not already applied in API call
-      if (pipelineId && (searchTitle || !pipelineId)) {
-        filteredDeals = filteredDeals.filter((deal: any) => deal.pipeline_id === pipelineId);
-      }
-
-      // Filter by value range if specified
-      if (minValue !== undefined || maxValue !== undefined) {
-        filteredDeals = filteredDeals.filter((deal: any) => {
-          const value = parseFloat(deal.value) || 0;
-          if (minValue !== undefined && value < minValue) return false;
-          if (maxValue !== undefined && value > maxValue) return false;
-          return true;
-        });
-      }
-
-      // Apply limit
-      if (filteredDeals.length > limit) {
-        filteredDeals = filteredDeals.slice(0, limit);
-      }
-
-      // Build filter summary for response
-      const filterSummary = {
-        ...(searchTitle && { search_title: searchTitle }),
-        ...(!searchTitle && { days_back: daysBack }),
-        ...(!searchTitle && { filter_date: new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString().split('T')[0] }),
-        status: status,
-        ...(ownerId && { owner_id: ownerId }),
-        ...(stageId && { stage_id: stageId }),
-        ...(pipelineId && { pipeline_id: pipelineId }),
-        ...(minValue !== undefined && { min_value: minValue }),
-        ...(maxValue !== undefined && { max_value: maxValue }),
-        total_deals_found: filteredDeals.length,
-        limit_applied: limit
+      const body: Record<string, unknown> = {
+        individual_reveal: individualReveal,
+        enrichment_level: enrichmentLevel,
       };
 
-      // Summarize deals to avoid massive responses but include notes and booking details
-      const bookingFieldKey = "8f4b27fbd9dfc70d2296f23ce76987051ad7324e";
-      const summarizedDeals = filteredDeals.map((deal: any) => ({
-        id: deal.id,
-        title: deal.title,
-        value: deal.value,
-        currency: deal.currency,
-        status: deal.status,
-        stage_name: deal.stage?.name || 'Unknown',
-        pipeline_name: deal.pipeline?.name || 'Unknown',
-        owner_name: deal.owner?.name || 'Unknown',
-        organization_name: deal.org?.name || null,
-        person_name: deal.person?.name || null,
-        add_time: deal.add_time,
-        last_activity_date: deal.last_activity_date,
-        close_time: deal.close_time,
-        won_time: deal.won_time,
-        lost_time: deal.lost_time,
-        notes_count: deal.notes_count || 0,
-        // Include recent notes if available
-        notes: deal.notes || [],
-        // Include custom booking details field
-        booking_details: deal[bookingFieldKey] || null
-      }));
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            summary: searchTitle
-              ? `Found ${filteredDeals.length} deals matching title search "${searchTitle}"`
-              : `Found ${filteredDeals.length} deals matching the specified filters`,
-            filters_applied: filterSummary,
-            total_found: filteredDeals.length,
-            deals: summarizedDeals.slice(0, 30) // Limit to 30 deals max to prevent huge responses
-          }, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error("Error fetching deals:", error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error fetching deals: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Get deal by ID
-server.tool(
-  "get-deal",
-  "Get a specific deal by ID including custom fields",
-  {
-    dealId: z.number().describe("Pipedrive deal ID")
-  },
-  async ({ dealId }) => {
-    try {
-      // @ts-ignore - Bypass incorrect TypeScript definition, API expects just the ID
-      const response = await dealsApi.getDeal(dealId);
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error(`Error fetching deal ${dealId}:`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error fetching deal ${dealId}: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Update an existing deal
-server.tool(
-  "update-deal",
-  "Update an existing Pipedrive deal. Supports common deal fields directly and custom fields via JSON objects.",
-  {
-    dealId: z.number().describe("Pipedrive deal ID"),
-    title: z.string().optional().describe("Updated deal title"),
-    value: z.number().optional().describe("Updated deal value"),
-    currency: z.string().optional().describe("Updated currency code such as EUR or USD"),
-    status: z.enum(['open', 'won', 'lost']).optional().describe("Updated deal status"),
-    ownerId: z.number().nullable().optional().describe("Updated owner/user ID, or null to clear if allowed"),
-    personId: z.number().nullable().optional().describe("Updated linked person ID, or null to unlink"),
-    organizationId: z.number().nullable().optional().describe("Updated linked organization ID, or null to unlink"),
-    expectedCloseDate: z.string().nullable().optional().describe("Updated expected close date in YYYY-MM-DD format"),
-    probability: z.number().min(0).max(100).nullable().optional().describe("Updated probability from 0 to 100"),
-    visibleTo: z.number().optional().describe("Updated visibility setting"),
-    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values, e.g. {"8f4...":"New value"}'),
-    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive deal fields to update, excluding stage_id'),
-    clearFields: z.array(z.string()).optional().describe("Field keys to explicitly clear by setting them to null, excluding stage_id")
-  },
-  async ({ dealId, ...input }: UpdateDealToolInput) => {
-    try {
-      const payload = buildDealPayload(input);
-
-      if (Object.keys(payload).length === 0) {
-        return {
-          content: [{
-            type: "text",
-            text: "Error updating deal: no fields were provided to update"
-          }],
-          isError: true
+      if (acceptWork !== undefined || acceptPersonal !== undefined) {
+        body.email_options = {
+          ...(acceptWork !== undefined ? { accept_work: acceptWork } : {}),
+          ...(acceptPersonal !== undefined ? { accept_personal: acceptPersonal } : {}),
         };
       }
 
-      const response = await callPipedriveApi('PATCH', `/api/v2/deals/${dealId}`, payload);
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            summary: `Updated deal ${dealId}`,
-            applied_updates: payload,
-            data: response.data ?? response
-          }, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error(`Error updating deal ${dealId}:`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error updating deal ${dealId}: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Create a new deal
-server.tool(
-  "create-deal",
-  "Create a new Pipedrive deal. Supports common deal fields directly and custom fields via JSON objects.",
-  {
-    title: z.string().describe("Deal title"),
-    value: z.number().optional().describe("Deal value"),
-    currency: z.string().optional().describe("Currency code such as EUR or USD"),
-    status: z.enum(['open', 'won', 'lost']).optional().describe("Initial deal status"),
-    ownerId: z.number().nullable().optional().describe("Owner/user ID"),
-    personId: z.number().nullable().optional().describe("Linked person ID"),
-    organizationId: z.number().nullable().optional().describe("Linked organization ID"),
-    expectedCloseDate: z.string().nullable().optional().describe("Expected close date in YYYY-MM-DD format"),
-    probability: z.number().min(0).max(100).nullable().optional().describe("Probability from 0 to 100"),
-    visibleTo: z.number().optional().describe("Visibility setting"),
-    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values, e.g. {"8f4...":"New value"}'),
-    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive deal fields to set, excluding stage_id'),
-    clearFields: z.array(z.string()).optional().describe("Field keys to set to null as part of creation, excluding stage_id")
-  },
-  async (input: CreateDealToolInput) => {
-    try {
-      const payload = buildDealPayload(input);
-      const response = await callPipedriveApi('POST', '/api/v2/deals', payload);
-      const createdDeal = response.data ?? response;
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            summary: `Created deal ${createdDeal?.id ?? 'unknown'}`,
-            data: createdDeal
-          }, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error("Error creating deal:", error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error creating deal: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Create a new person
-server.tool(
-  "create-person",
-  "Create a new Pipedrive person/contact. Supports common fields directly and custom fields via JSON objects.",
-  {
-    name: z.string().describe("Person name"),
-    ownerId: z.number().nullable().optional().describe("Owner/user ID"),
-    organizationId: z.number().nullable().optional().describe("Linked organization ID"),
-    email: z.string().nullable().optional().describe("Primary email address"),
-    phone: z.string().nullable().optional().describe("Primary phone number"),
-    emailsJson: z.string().optional().describe('JSON array for advanced email objects, e.g. [{"value":"taylor@example.com","primary":true}]'),
-    phonesJson: z.string().optional().describe('JSON array for advanced phone objects, e.g. [{"value":"+61...","primary":true}]'),
-    visibleTo: z.number().optional().describe("Visibility setting"),
-    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values'),
-    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive person fields to set'),
-    clearFields: z.array(z.string()).optional().describe("Field keys to set to null")
-  },
-  async (input: CreatePersonToolInput) => {
-    try {
-      const payload = buildPersonPayload(input);
-      const response = await callPipedriveApi('POST', '/api/v2/persons', payload);
-      const createdPerson = response.data ?? response;
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            summary: `Created person ${createdPerson?.id ?? 'unknown'}`,
-            data: createdPerson
-          }, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error("Error creating person:", error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error creating person: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Update an existing person
-server.tool(
-  "update-person",
-  "Update an existing Pipedrive person/contact. Useful for fixing missing email or phone details.",
-  {
-    personId: z.number().describe("Pipedrive person ID"),
-    name: z.string().optional().describe("Updated person name"),
-    ownerId: z.number().nullable().optional().describe("Updated owner/user ID"),
-    organizationId: z.number().nullable().optional().describe("Updated linked organization ID"),
-    email: z.string().nullable().optional().describe("Primary email address to replace the current email set"),
-    phone: z.string().nullable().optional().describe("Primary phone number to replace the current phone set"),
-    emailsJson: z.string().optional().describe('JSON array for advanced email objects, e.g. [{"value":"ogi@example.com","primary":true}]'),
-    phonesJson: z.string().optional().describe('JSON array for advanced phone objects'),
-    visibleTo: z.number().optional().describe("Updated visibility setting"),
-    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values'),
-    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive person fields to update'),
-    clearFields: z.array(z.string()).optional().describe("Field keys to set to null")
-  },
-  async ({ personId, ...input }: UpdatePersonToolInput) => {
-    try {
-      const payload = buildPersonPayload(input);
-
-      if (Object.keys(payload).length === 0) {
-        return {
-          content: [{
-            type: "text",
-            text: "Error updating person: no fields were provided to update"
-          }],
-          isError: true
-        };
+      if (callbackUrl) {
+        body.callback_url = callbackUrl;
       }
 
-      const response = await callPipedriveApi('PATCH', `/api/v2/persons/${personId}`, payload);
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            summary: `Updated person ${personId}`,
-            applied_updates: payload,
-            data: response.data ?? response
-          }, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error(`Error updating person ${personId}:`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error updating person ${personId}: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Create a new organization
-server.tool(
-  "create-organization",
-  "Create a new Pipedrive organization/company. Supports common fields directly and custom fields via JSON objects.",
-  {
-    name: z.string().describe("Organization name"),
-    ownerId: z.number().nullable().optional().describe("Owner/user ID"),
-    visibleTo: z.number().optional().describe("Visibility setting"),
-    address: z.string().nullable().optional().describe("Full address"),
-    country: z.string().nullable().optional().describe("Country"),
-    locality: z.string().nullable().optional().describe("City or locality"),
-    customFieldsJson: z.string().optional().describe('JSON object of custom field keys to values'),
-    additionalFieldsJson: z.string().optional().describe('JSON object of any additional Pipedrive organization fields to set'),
-    clearFields: z.array(z.string()).optional().describe("Field keys to set to null")
-  },
-  async (input: CreateOrganizationToolInput) => {
-    try {
-      const payload = buildOrganizationPayload(input);
-      const response = await callPipedriveApi('POST', '/api/v2/organizations', payload);
-      const createdOrganization = response.data ?? response;
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            summary: `Created organization ${createdOrganization?.id ?? 'unknown'}`,
-            data: createdOrganization
-          }, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error("Error creating organization:", error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error creating organization: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-const addNoteHandler = async (input: CreateNoteToolInput) => {
-  try {
-    const payload = buildNotePayload(input);
-    const response = await callPipedriveApi('POST', '/api/v1/notes', payload);
-    const createdNote = response.data ?? response;
-
-    return createTextToolResult(JSON.stringify({
-      summary: `Created note ${createdNote?.id ?? 'unknown'}`,
-      data: createdNote
-    }, null, 2));
-  } catch (error) {
-    console.error("Error creating note:", error);
-    return createTextToolErrorResult(`Error creating note: ${getErrorMessage(error)}`);
-  }
-};
-
-// Add a note
-server.tool(
-  "add-note",
-  "Add a note to a deal, person, organization, or lead. Content should be HTML or plain text.",
-  {
-    content: z.string().describe("Note content (HTML or plain text)"),
-    dealId: z.number().optional().describe("Deal ID to attach the note to"),
-    personId: z.number().optional().describe("Person ID to attach the note to"),
-    organizationId: z.number().optional().describe("Organization ID to attach the note to"),
-    leadId: z.string().optional().describe("Lead UUID to attach the note to"),
-    userId: z.number().optional().describe("Author user ID"),
-    addTime: z.string().optional().describe("Optional creation timestamp in YYYY-MM-DD HH:MM:SS"),
-    pinnedToDeal: z.boolean().optional().describe("Pin the note to the deal"),
-    pinnedToPerson: z.boolean().optional().describe("Pin the note to the person"),
-    pinnedToOrganization: z.boolean().optional().describe("Pin the note to the organization"),
-    pinnedToLead: z.boolean().optional().describe("Pin the note to the lead")
-  },
-  addNoteHandler
-);
-
-// Alias for add-note
-server.tool(
-  "create-note",
-  "Create a note attached to a deal, person, organization, or lead. Content should be HTML or plain text.",
-  {
-    content: z.string().describe("Note content (HTML or plain text)"),
-    dealId: z.number().optional().describe("Deal ID to attach the note to"),
-    personId: z.number().optional().describe("Person ID to attach the note to"),
-    organizationId: z.number().optional().describe("Organization ID to attach the note to"),
-    leadId: z.string().optional().describe("Lead UUID to attach the note to"),
-    userId: z.number().optional().describe("Author user ID"),
-    addTime: z.string().optional().describe("Optional creation timestamp in YYYY-MM-DD HH:MM:SS"),
-    pinnedToDeal: z.boolean().optional().describe("Pin the note to the deal"),
-    pinnedToPerson: z.boolean().optional().describe("Pin the note to the person"),
-    pinnedToOrganization: z.boolean().optional().describe("Pin the note to the organization"),
-    pinnedToLead: z.boolean().optional().describe("Pin the note to the lead")
-  },
-  addNoteHandler
-);
-
-// Create a new activity
-server.tool(
-  "create-activity",
-  "Create a Pipedrive activity/task/reminder for a deal, person, organization, or lead.",
-  {
-    subject: z.string().describe("Activity subject"),
-    type: z.string().optional().describe("Activity type key, e.g. task, meeting, call, lunch"),
-    ownerId: z.number().optional().describe("Owner/user ID"),
-    dealId: z.number().optional().describe("Linked deal ID"),
-    personId: z.number().optional().describe("Linked person ID"),
-    organizationId: z.number().optional().describe("Linked organization ID"),
-    leadId: z.string().optional().describe("Linked lead UUID"),
-    dueDate: z.string().optional().describe("Due date in YYYY-MM-DD"),
-    dueTime: z.string().optional().describe("Due time in HH:MM"),
-    duration: z.string().optional().describe("Duration in HH:MM or HH:MM:SS"),
-    busy: z.boolean().optional().describe("Whether this marks the assignee as busy"),
-    done: z.boolean().optional().describe("Whether the activity is already completed"),
-    note: z.string().optional().describe("Internal note for the activity"),
-    publicDescription: z.string().optional().describe("Public description visible to guests"),
-    priority: z.number().optional().describe("Priority value")
-  },
-  async (input: CreateActivityToolInput) => {
-    try {
-      const payload = buildActivityPayload(input);
-      const response = await callPipedriveApi('POST', '/api/v2/activities', payload);
-      const createdActivity = response.data ?? response;
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            summary: `Created activity ${createdActivity?.id ?? 'unknown'}`,
-            data: createdActivity
-          }, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error("Error creating activity:", error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error creating activity: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Get deal notes and custom booking details
-server.tool(
-  "get-deal-notes",
-  "Get detailed notes and custom booking details for a specific deal",
-  {
-    dealId: z.number().describe("Pipedrive deal ID"),
-    limit: z.number().optional().describe("Maximum number of notes to return (default: 20)")
-  },
-  async ({ dealId, limit = 20 }) => {
-    try {
-      const result: any = {
-        deal_id: dealId,
-        notes: [],
-        booking_details: null
-      };
-
-      // Get deal details including custom fields
-      try {
-        // @ts-ignore - Bypass incorrect TypeScript definition
-        const dealResponse = await dealsApi.getDeal(dealId);
-        const deal = dealResponse.data;
-
-        // Extract custom booking field
-        const bookingFieldKey = "8f4b27fbd9dfc70d2296f23ce76987051ad7324e";
-        if (deal && deal[bookingFieldKey]) {
-          result.booking_details = deal[bookingFieldKey];
-        }
-      } catch (dealError) {
-        console.error(`Error fetching deal details for ${dealId}:`, dealError);
-        result.deal_error = getErrorMessage(dealError);
-      }
-
-      // Get deal notes
-      try {
-        // @ts-ignore - API parameters may not be fully typed
-        // @ts-ignore - Bypass incorrect TypeScript definition
-        const notesResponse = await notesApi.getNotes({
-          deal_id: dealId,
-          limit: limit
-        });
-        result.notes = notesResponse.data || [];
-      } catch (noteError) {
-        console.error(`Error fetching notes for deal ${dealId}:`, noteError);
-        result.notes_error = getErrorMessage(noteError);
-      }
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            summary: `Retrieved ${result.notes.length} notes and booking details for deal ${dealId}`,
-            ...result
-          }, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error(`Error fetching deal notes ${dealId}:`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error fetching deal notes ${dealId}: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Search deals
-server.tool(
-  "search-deals",
-  "Search deals by term",
-  {
-    term: z.string().describe("Search term for deals")
-  },
-  async ({ term }) => {
-    try {
-      // @ts-ignore - Bypass incorrect TypeScript definition
-      const response = await dealsApi.searchDeals(term);
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error(`Error searching deals with term "${term}":`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error searching deals: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Get all persons
-server.tool(
-  "get-persons",
-  "Get all persons from Pipedrive including custom fields",
-  {},
-  async () => {
-    try {
-      const response = await personsApi.getPersons();
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error("Error fetching persons:", error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error fetching persons: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Get person by ID
-server.tool(
-  "get-person",
-  "Get a specific person by ID including custom fields",
-  {
-    personId: z.number().describe("Pipedrive person ID")
-  },
-  async ({ personId }) => {
-    try {
-      // @ts-ignore - Bypass incorrect TypeScript definition
-      const response = await personsApi.getPerson(personId);
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error(`Error fetching person ${personId}:`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error fetching person ${personId}: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Search persons
-server.tool(
-  "search-persons",
-  "Search persons by term",
-  {
-    term: z.string().describe("Search term for persons")
-  },
-  async ({ term }) => {
-    try {
-      // @ts-ignore - Bypass incorrect TypeScript definition
-      const response = await personsApi.searchPersons(term);
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error(`Error searching persons with term "${term}":`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error searching persons: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Get all organizations
-server.tool(
-  "get-organizations",
-  "Get all organizations from Pipedrive including custom fields",
-  {},
-  async () => {
-    try {
-      const response = await organizationsApi.getOrganizations();
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error("Error fetching organizations:", error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error fetching organizations: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Get organization by ID
-server.tool(
-  "get-organization",
-  "Get a specific organization by ID including custom fields",
-  {
-    organizationId: z.number().describe("Pipedrive organization ID")
-  },
-  async ({ organizationId }) => {
-    try {
-      // @ts-ignore - Bypass incorrect TypeScript definition
-      const response = await organizationsApi.getOrganization(organizationId);
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error(`Error fetching organization ${organizationId}:`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error fetching organization ${organizationId}: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Search organizations
-server.tool(
-  "search-organizations",
-  "Search organizations by term",
-  {
-    term: z.string().describe("Search term for organizations")
-  },
-  async ({ term }) => {
-    try {
-      // @ts-ignore - API method exists but TypeScript definition is wrong
-      const response = await (organizationsApi as any).searchOrganization({ term });
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error(`Error searching organizations with term "${term}":`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error searching organizations: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Get all pipelines
-server.tool(
-  "get-pipelines",
-  "Get all pipelines from Pipedrive",
-  {},
-  async () => {
-    try {
-      const response = await pipelinesApi.getPipelines();
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error("Error fetching pipelines:", error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error fetching pipelines: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Get pipeline by ID
-server.tool(
-  "get-pipeline",
-  "Get a specific pipeline by ID",
-  {
-    pipelineId: z.number().describe("Pipedrive pipeline ID")
-  },
-  async ({ pipelineId }) => {
-    try {
-      // @ts-ignore - Bypass incorrect TypeScript definition
-      const response = await pipelinesApi.getPipeline(pipelineId);
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error(`Error fetching pipeline ${pipelineId}:`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error fetching pipeline ${pipelineId}: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Get all stages
-server.tool(
-  "get-stages",
-  "Get all stages from Pipedrive",
-  {},
-  async () => {
-    try {
-      // Since the stages are related to pipelines, we'll get all pipelines first
-      const pipelinesResponse = await pipelinesApi.getPipelines();
-      const pipelines = pipelinesResponse.data || [];
-      
-      // For each pipeline, fetch its stages
-      const allStages = [];
-      for (const pipeline of pipelines) {
-        try {
-          // @ts-ignore - Type definitions for getPipelineStages are incomplete
-          const stagesResponse = await pipelinesApi.getPipelineStages(pipeline.id);
-          const stagesData = Array.isArray(stagesResponse?.data)
-            ? stagesResponse.data
-            : [];
-
-          if (stagesData.length > 0) {
-            const pipelineStages = stagesData.map((stage: any) => ({
-              ...stage,
-              pipeline_name: pipeline.name
-            }));
-            allStages.push(...pipelineStages);
-          }
-        } catch (e) {
-          console.error(`Error fetching stages for pipeline ${pipeline.id}:`, e);
-        }
-      }
-      
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(allStages, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error("Error fetching stages:", error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error fetching stages: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Search leads
-server.tool(
-  "search-leads",
-  "Search leads by term",
-  {
-    term: z.string().describe("Search term for leads")
-  },
-  async ({ term }) => {
-    try {
-      // @ts-ignore - Bypass incorrect TypeScript definition
-      const response = await leadsApi.searchLeads(term);
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
-    } catch (error) {
-      console.error(`Error searching leads with term "${term}":`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error searching leads: ${getErrorMessage(error)}`
-        }],
-        isError: true
-      };
-    }
-  }
-);
-
-// Generic search across item types
-server.tool(
-  "search-all",
-  "Search across all item types (deals, persons, organizations, etc.)",
-  {
-    term: z.string().describe("Search term"),
-    itemTypes: z.string().optional().describe("Comma-separated list of item types to search (deal,person,organization,product,file,activity,lead)")
-  },
-  async ({ term, itemTypes }) => {
-    try {
-      const itemType = itemTypes; // Just rename the parameter
-      const response = await itemSearchApi.searchItem({ 
-        term,
-        itemType 
+      const startResponse = await callWizaApi<IndividualRevealResponse>({
+        method: "POST",
+        path: "/api/individual_reveals",
+        body,
       });
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(response.data, null, 2)
-        }]
-      };
+
+      const revealId = startResponse.data?.id;
+
+      if (!waitForCompletion || !revealId) {
+        return createTextToolResult({
+          summary: revealId
+            ? `Started Wiza individual reveal ${revealId} (status: ${startResponse.data?.status})`
+            : "Wiza individual reveal request submitted",
+          reveal: startResponse,
+        });
+      }
+
+      const finalResponse = await pollIndividualReveal(
+        revealId,
+        timeoutSeconds * 1000,
+        pollIntervalSeconds * 1000
+      );
+
+      const finalStatus = finalResponse.data?.status;
+      const summary =
+        finalStatus === "finished"
+          ? `Wiza enrichment finished for reveal ${revealId}`
+          : finalStatus === "failed"
+            ? `Wiza enrichment failed for reveal ${revealId}`
+            : `Wiza enrichment for reveal ${revealId} did not finish within ${timeoutSeconds}s (status: ${finalStatus}). You can poll with get-enrichment.`;
+
+      return createTextToolResult({
+        summary,
+        reveal_id: revealId,
+        status: finalStatus,
+        contact: finalResponse.data,
+      });
     } catch (error) {
-      console.error(`Error performing search with term "${term}":`, error);
-      return {
-        content: [{
-          type: "text",
-          text: `Error performing search: ${getErrorMessage(error)}`
-        }],
-        isError: true
+      console.error("Error enriching contact:", error);
+      return createTextToolErrorResult(`Error enriching contact: ${getErrorMessage(error)}`);
+    }
+  }
+);
+
+server.tool(
+  "get-enrichment",
+  "Fetch the latest status and data of a Wiza individual reveal by id. Use after enrich-contact when waitForCompletion was false or timed out.",
+  {
+    revealId: z.coerce.number().int().positive().describe("The individual reveal id returned by enrich-contact"),
+  },
+  async ({ revealId }) => {
+    try {
+      const response = await callWizaApi<IndividualRevealResponse>({
+        method: "GET",
+        path: `/api/individual_reveals/${revealId}`,
+      });
+      return createTextToolResult({
+        summary: `Reveal ${revealId} status: ${response.data?.status}`,
+        contact: response.data,
+      });
+    } catch (error) {
+      console.error(`Error fetching individual reveal ${revealId}:`, error);
+      return createTextToolErrorResult(
+        `Error fetching individual reveal ${revealId}: ${getErrorMessage(error)}`
+      );
+    }
+  }
+);
+
+server.tool(
+  "enrich-company",
+  "Enrich a single company via Wiza. Provide at least one of: companyName, companyDomain, companyLinkedinId, or companyLinkedinSlug. Returns immediately with industry, size, revenue, funding, and location data. Costs 2 API credits per successful lookup.",
+  {
+    companyName: z.string().optional().describe("Company name, e.g. 'Wiza'"),
+    companyDomain: z.string().optional().describe("Company domain, e.g. 'wiza.co'"),
+    companyLinkedinId: z.string().optional().describe("LinkedIn company id, e.g. '18663757'"),
+    companyLinkedinSlug: z.string().optional().describe("LinkedIn company slug from the LinkedIn URL, e.g. 'wiza'"),
+  },
+  async ({ companyName, companyDomain, companyLinkedinId, companyLinkedinSlug }) => {
+    if (!companyName && !companyDomain && !companyLinkedinId && !companyLinkedinSlug) {
+      return createTextToolErrorResult(
+        "Provide at least one of: companyName, companyDomain, companyLinkedinId, or companyLinkedinSlug."
+      );
+    }
+
+    try {
+      const body: Record<string, unknown> = {};
+      if (companyName) body.company_name = companyName;
+      if (companyDomain) body.company_domain = companyDomain;
+      if (companyLinkedinId) body.company_linkedin_id = companyLinkedinId;
+      if (companyLinkedinSlug) body.company_linkedin_slug = companyLinkedinSlug;
+
+      const response = await callWizaApi<{
+        status?: { code?: number; message?: string };
+        type?: string;
+        data?: Record<string, unknown>;
+      }>({
+        method: "POST",
+        path: "/api/company_enrichments",
+        body,
+      });
+
+      return createTextToolResult({
+        summary: response.status?.message || "Company enrichment retrieved",
+        company: response.data,
+      });
+    } catch (error) {
+      console.error("Error enriching company:", error);
+      return createTextToolErrorResult(`Error enriching company: ${getErrorMessage(error)}`);
+    }
+  }
+);
+
+const wizaListItemSchema = z
+  .object({
+    profile_url: z.string().optional().describe("LinkedIn profile URL"),
+    email: z.string().optional().describe("Email address"),
+    full_name: z.string().optional().describe("Full name"),
+    company: z.string().optional().describe("Company name (used with full_name)"),
+    domain: z.string().optional().describe("Company domain (used with full_name)"),
+  })
+  .refine(
+    (item) =>
+      Boolean(item.profile_url) ||
+      Boolean(item.email) ||
+      (Boolean(item.full_name) && (Boolean(item.company) || Boolean(item.domain))),
+    {
+      message:
+        "Each item needs profile_url, email, or full_name with company/domain.",
+    }
+  );
+
+server.tool(
+  "create-enrichment-list",
+  "Create a Wiza bulk enrichment list. Each item can be a LinkedIn URL, an email, or full_name + company/domain. Returns a list id. Use get-list to check status and get-list-contacts to retrieve enriched results.",
+  {
+    name: z.string().describe("Name of the list, e.g. 'VP of Sales follow-up'"),
+    enrichmentLevel: z
+      .enum(["none", "partial", "full"])
+      .default("full")
+      .describe("Enrichment depth: 'none' (no email/phone lookup), 'partial' (find email), 'full' (find email + phone)"),
+    items: z.array(wizaListItemSchema).min(1).max(2500).describe("Up to 2500 items to enrich"),
+    acceptWork: z.boolean().optional().describe("Accept professional emails. Defaults to true."),
+    acceptPersonal: z.boolean().optional().describe("Accept personal emails. Defaults to true."),
+    acceptGeneric: z.boolean().optional().describe("Accept generic emails like hello@company.com. Defaults to true."),
+    callbackUrl: z.string().url().optional().describe("Optional webhook URL for async completion notification"),
+  },
+  async ({
+    name,
+    enrichmentLevel = "full",
+    items,
+    acceptWork = true,
+    acceptPersonal = true,
+    acceptGeneric = true,
+    callbackUrl,
+  }) => {
+    try {
+      const body: Record<string, unknown> = {
+        list: {
+          name,
+          enrichment_level: enrichmentLevel,
+          email_options: {
+            accept_work: acceptWork,
+            accept_personal: acceptPersonal,
+            accept_generic: acceptGeneric,
+          },
+          items,
+          ...(callbackUrl ? { callback_url: callbackUrl } : {}),
+        },
       };
+
+      const response = await callWizaApi<{ data?: { id?: number; status?: string } }>({
+        method: "POST",
+        path: "/api/lists",
+        body,
+      });
+
+      return createTextToolResult({
+        summary: response.data?.id
+          ? `Created Wiza list ${response.data.id} (status: ${response.data.status}) with ${items.length} item(s)`
+          : "Wiza list created",
+        list: response.data,
+      });
+    } catch (error) {
+      console.error("Error creating Wiza list:", error);
+      return createTextToolErrorResult(`Error creating Wiza list: ${getErrorMessage(error)}`);
+    }
+  }
+);
+
+server.tool(
+  "get-list",
+  "Get the status and metadata of a Wiza enrichment list.",
+  {
+    listId: z.coerce.number().int().positive().describe("The list id returned by create-enrichment-list"),
+  },
+  async ({ listId }) => {
+    try {
+      const response = await callWizaApi<{ data?: Record<string, unknown> }>({
+        method: "GET",
+        path: `/api/lists/${listId}`,
+      });
+      return createTextToolResult({
+        summary: `Wiza list ${listId} status: ${(response.data as any)?.status}`,
+        list: response.data,
+      });
+    } catch (error) {
+      console.error(`Error fetching Wiza list ${listId}:`, error);
+      return createTextToolErrorResult(
+        `Error fetching Wiza list ${listId}: ${getErrorMessage(error)}`
+      );
+    }
+  }
+);
+
+server.tool(
+  "get-list-contacts",
+  "Fetch the enriched contacts for a completed Wiza list. The list must be in 'finished' state. Segment filters which contacts to return.",
+  {
+    listId: z.coerce.number().int().positive().describe("The list id"),
+    segment: z
+      .enum(["people", "valid", "risky"])
+      .default("people")
+      .describe("'people' = all, 'valid' = only valid emails, 'risky' = only risky emails"),
+  },
+  async ({ listId, segment = "people" }) => {
+    try {
+      const response = await callWizaApi<{ data?: unknown[] }>({
+        method: "GET",
+        path: `/api/lists/${listId}/contacts`,
+        query: { segment },
+      });
+
+      const contacts = response.data ?? [];
+      return createTextToolResult({
+        summary: `Retrieved ${Array.isArray(contacts) ? contacts.length : 0} contact(s) for list ${listId} (segment: ${segment})`,
+        contacts,
+      });
+    } catch (error) {
+      console.error(`Error fetching contacts for list ${listId}:`, error);
+      return createTextToolErrorResult(
+        `Error fetching contacts for list ${listId}: ${getErrorMessage(error)}`
+      );
+    }
+  }
+);
+
+const includeExcludeSchema = z
+  .object({
+    v: z.string().describe("Value"),
+    s: z.enum(["i", "e"]).default("i").describe("'i' to include, 'e' to exclude"),
+  });
+
+const locationFilterSchema = z.object({
+  v: z.string().describe("Location value, e.g. 'Toronto, Ontario, Canada'"),
+  b: z.enum(["city", "state", "country"]).describe("Location granularity"),
+  s: z.enum(["i", "e"]).default("i").describe("'i' to include, 'e' to exclude"),
+});
+
+server.tool(
+  "prospect-search",
+  "Search the Wiza prospect database with structured filters. Returns a count of matching prospects and (optionally) up to 30 sample profiles. Useful for sizing audiences before creating an enrichment list.",
+  {
+    size: z.number().int().min(0).max(30).optional().describe("Number of sample prospects to return (0-30, default 0)"),
+    firstName: z.array(z.string()).optional().describe("Exact first names to match"),
+    lastName: z.array(z.string()).optional().describe("Exact last names to match"),
+    jobTitle: z.array(includeExcludeSchema).optional().describe("Job titles to include or exclude"),
+    jobTitleLevel: z
+      .array(
+        z.enum([
+          "CXO",
+          "Director",
+          "Entry",
+          "Manager",
+          "Owner",
+          "Partner",
+          "Senior",
+          "Training",
+          "Unpaid",
+          "VP",
+        ])
+      )
+      .optional()
+      .describe("Seniority levels"),
+    jobRole: z.array(z.string()).optional().describe("Job roles like 'engineering', 'sales', 'marketing'"),
+    location: z.array(locationFilterSchema).optional().describe("Person locations"),
+    skill: z.array(z.string()).optional().describe("Skills"),
+    school: z.array(z.string()).optional().describe("School names"),
+    major: z.array(z.string()).optional().describe("Majors"),
+    linkedinSlug: z.array(z.string()).optional().describe("LinkedIn slugs (e.g. 'stephen-hakami-5babb21b0')"),
+    jobCompany: z.array(includeExcludeSchema).optional().describe("Current companies to include or exclude"),
+    pastCompany: z.array(includeExcludeSchema).optional().describe("Past companies to include or exclude"),
+    companyLocation: z.array(locationFilterSchema).optional().describe("Company locations"),
+    companyIndustry: z.array(includeExcludeSchema).optional().describe("Company industries"),
+    companySize: z
+      .array(z.enum(["1-10", "11-50", "51-200", "201-500", "501-1000", "1001-5000", "5001-10000", "10001+"]))
+      .optional()
+      .describe("Company size buckets"),
+  },
+  async (input) => {
+    try {
+      const filters: Record<string, unknown> = {};
+      if (input.firstName) filters.first_name = input.firstName;
+      if (input.lastName) filters.last_name = input.lastName;
+      if (input.jobTitle) filters.job_title = input.jobTitle;
+      if (input.jobTitleLevel) filters.job_title_level = input.jobTitleLevel;
+      if (input.jobRole) filters.job_role = input.jobRole;
+      if (input.location) filters.location = input.location;
+      if (input.skill) filters.skill = input.skill;
+      if (input.school) filters.school = input.school;
+      if (input.major) filters.major = input.major;
+      if (input.linkedinSlug) filters.linkedin_slug = input.linkedinSlug;
+      if (input.jobCompany) filters.job_company = input.jobCompany;
+      if (input.pastCompany) filters.past_company = input.pastCompany;
+      if (input.companyLocation) filters.company_location = input.companyLocation;
+      if (input.companyIndustry) filters.company_industry = input.companyIndustry;
+      if (input.companySize) filters.company_size = input.companySize;
+
+      if (Object.keys(filters).length === 0) {
+        return createTextToolErrorResult(
+          "Provide at least one filter (e.g. jobTitle, location, jobCompany, etc.) to run a prospect search."
+        );
+      }
+
+      const body: Record<string, unknown> = {
+        size: input.size ?? 0,
+        filters,
+      };
+
+      const response = await callWizaApi<{
+        status?: { code?: number; message?: string };
+        data?: { total?: number; profiles?: unknown[] };
+      }>({
+        method: "POST",
+        path: "/api/prospects/search",
+        body,
+      });
+
+      return createTextToolResult({
+        summary: `Found ${response.data?.total ?? "unknown"} matching prospect(s); returned ${
+          response.data?.profiles?.length ?? 0
+        } sample(s).`,
+        total: response.data?.total,
+        profiles: response.data?.profiles ?? [],
+      });
+    } catch (error) {
+      console.error("Error running prospect search:", error);
+      return createTextToolErrorResult(`Error running prospect search: ${getErrorMessage(error)}`);
     }
   }
 );
 
 // === PROMPTS ===
 
-// Prompt for getting all deals
 server.prompt(
-  "list-all-deals",
-  "List all deals in Pipedrive",
-  {},
-  () => ({
-    messages: [{
-      role: "user",
-      content: {
-        type: "text",
-        text: "Please list all deals in my Pipedrive account, showing their title, value, status, and stage."
-      }
-    }]
+  "enrich-by-linkedin",
+  "Enrich a contact from a LinkedIn URL",
+  {
+    profileUrl: z.string().describe("LinkedIn profile URL"),
+  },
+  ({ profileUrl }) => ({
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Use Wiza to fully enrich the contact at ${profileUrl}. Return their work email, mobile phone, current title, location, and company details.`,
+        },
+      },
+    ],
   })
 );
 
-// Prompt for getting all persons
 server.prompt(
-  "list-all-persons",
-  "List all persons in Pipedrive",
-  {},
-  () => ({
-    messages: [{
-      role: "user",
-      content: {
-        type: "text",
-        text: "Please list all persons in my Pipedrive account, showing their name, email, phone, and organization."
-      }
-    }]
+  "enrich-by-name-and-company",
+  "Enrich a contact by name and company",
+  {
+    fullName: z.string().describe("Full name"),
+    company: z.string().describe("Company name or domain"),
+  },
+  ({ fullName, company }) => ({
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Use Wiza to enrich ${fullName} who works at ${company}. Return their work email, mobile phone, current title, location, and company information.`,
+        },
+      },
+    ],
   })
 );
 
-// Prompt for getting all pipelines
 server.prompt(
-  "list-all-pipelines",
-  "List all pipelines in Pipedrive",
-  {},
-  () => ({
-    messages: [{
-      role: "user",
-      content: {
-        type: "text",
-        text: "Please list all pipelines in my Pipedrive account, showing their name and stages."
-      }
-    }]
+  "company-research",
+  "Look up firmographic data for a company",
+  {
+    companyDomainOrName: z.string().describe("Company domain or name"),
+  },
+  ({ companyDomainOrName }) => ({
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Use the Wiza company enrichment to look up "${companyDomainOrName}" and summarize: industry, employee size range, revenue range, funding, location, and a short company description.`,
+        },
+      },
+    ],
   })
 );
 
-// Prompt for analyzing deals
 server.prompt(
-  "analyze-deals",
-  "Analyze deals by stage",
+  "check-credit-balance",
+  "Show remaining Wiza credits",
   {},
   () => ({
-    messages: [{
-      role: "user",
-      content: {
-        type: "text",
-        text: "Please analyze the deals in my Pipedrive account, grouping them by stage and providing total value for each stage."
-      }
-    }]
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: "Use the get-credits tool and tell me how many email, phone, export, and API credits I have remaining on Wiza.",
+        },
+      },
+    ],
   })
 );
 
-// Prompt for analyzing contacts
-server.prompt(
-  "analyze-contacts",
-  "Analyze contacts by organization",
-  {},
-  () => ({
-    messages: [{
-      role: "user",
-      content: {
-        type: "text",
-        text: "Please analyze the persons in my Pipedrive account, grouping them by organization and providing a count for each organization."
-      }
-    }]
-  })
-);
+// === TRANSPORT ===
 
-// Prompt for analyzing leads
-server.prompt(
-  "analyze-leads",
-  "Analyze leads by status",
-  {},
-  () => ({
-    messages: [{
-      role: "user",
-      content: {
-        type: "text",
-        text: "Please search for all leads in my Pipedrive account and group them by status."
-      }
-    }]
-  })
-);
+const transportType = process.env.MCP_TRANSPORT || (process.env.PORT ? "sse" : "stdio");
 
-// Prompt for pipeline comparison
-server.prompt(
-  "compare-pipelines",
-  "Compare different pipelines and their stages",
-  {},
-  () => ({
-    messages: [{
-      role: "user",
-      content: {
-        type: "text",
-        text: "Please list all pipelines in my Pipedrive account and compare them by showing the stages in each pipeline."
-      }
-    }]
-  })
-);
+if (transportType === "sse") {
+  const port = parseInt(process.env.MCP_PORT || process.env.PORT || "3000", 10);
+  const endpoint = process.env.MCP_ENDPOINT || "/message";
 
-// Prompt for finding high-value deals
-server.prompt(
-  "find-high-value-deals",
-  "Find high-value deals",
-  {},
-  () => ({
-    messages: [{
-      role: "user",
-      content: {
-        type: "text",
-        text: "Please identify the highest value deals in my Pipedrive account and provide information about which stage they're in and which person or organization they're associated with."
-      }
-    }]
-  })
-);
-
-// Get transport type from environment variable (default to stdio, or sse if PORT is set)
-const transportType = process.env.MCP_TRANSPORT || (process.env.PORT ? 'sse' : 'stdio');
-
-if (transportType === 'sse') {
-  // SSE transport - create HTTP server
-  const port = parseInt(process.env.MCP_PORT || process.env.PORT || '3000', 10);
-  const endpoint = process.env.MCP_ENDPOINT || '/message';
-
-  // Store active transports by session ID
   const transports = new Map<string, SSEServerTransport>();
 
   const httpServer = http.createServer(async (req, res) => {
     const url = new URL(req.url!, `http://${req.headers.host}`);
 
-    // Enable CORS
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Session-Id');
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Session-Id");
 
-    if (req.method === 'OPTIONS') {
+    if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
       return;
     }
 
-    if (req.method === 'GET' && url.pathname === '/sse') {
+    if (req.method === "GET" && url.pathname === "/sse") {
       const authResult = verifyRequestAuthentication(req);
       if (!authResult.ok) {
-        res.writeHead(authResult.status, { 'Content-Type': 'application/json' });
+        res.writeHead(authResult.status, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: authResult.message }));
         return;
       }
 
-      // Establish SSE connection
-      console.error('New SSE connection request');
+      console.error("New SSE connection request");
       const transport = new SSEServerTransport(endpoint, res);
 
-      // Store transport by session ID
       transports.set(transport.sessionId, transport);
 
       transport.onclose = () => {
@@ -1756,75 +801,72 @@ if (transportType === 'sse') {
         await server.connect(transport);
         console.error(`SSE connection established: ${transport.sessionId}`);
       } catch (err) {
-        console.error('Failed to establish SSE connection:', err);
+        console.error("Failed to establish SSE connection:", err);
         transports.delete(transport.sessionId);
       }
-    } else if (req.method === 'POST' && url.pathname === endpoint) {
+    } else if (req.method === "POST" && url.pathname === endpoint) {
       const authResult = verifyRequestAuthentication(req);
       if (!authResult.ok) {
-        res.writeHead(authResult.status, { 'Content-Type': 'application/json' });
+        res.writeHead(authResult.status, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: authResult.message }));
         return;
       }
 
-      // Handle incoming message
-      const sessionId = url.searchParams.get('sessionId') || req.headers['x-session-id'] as string;
+      const sessionId = url.searchParams.get("sessionId") || (req.headers["x-session-id"] as string);
 
       if (!sessionId) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing sessionId' }));
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing sessionId" }));
         return;
       }
 
       const transport = transports.get(sessionId);
       if (!transport) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Session not found' }));
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Session not found" }));
         return;
       }
 
-      req.on('error', err => {
-        console.error('Error receiving POST message body:', err);
+      req.on("error", (err) => {
+        console.error("Error receiving POST message body:", err);
         if (!res.headersSent) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Invalid request body' }));
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Invalid request body" }));
         }
       });
 
       try {
         await transport.handlePostMessage(req, res);
       } catch (err) {
-        console.error('Error handling POST message:', err);
+        console.error("Error handling POST message:", err);
         if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Internal server error' }));
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Internal server error" }));
         }
       }
     } else {
-      // Health check endpoint
-      if (req.method === 'GET' && url.pathname === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', transport: 'sse' }));
+      if (req.method === "GET" && url.pathname === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok", transport: "sse" }));
         return;
       }
 
       res.writeHead(404);
-      res.end('Not found');
+      res.end("Not found");
     }
   });
 
   httpServer.listen(port, () => {
-    console.error(`Pipedrive MCP Server (SSE) listening on port ${port}`);
+    console.error(`Wiza MCP Server (SSE) listening on port ${port}`);
     console.error(`SSE endpoint: http://localhost:${port}/sse`);
     console.error(`Message endpoint: http://localhost:${port}${endpoint}`);
   });
 } else {
-  // Default: stdio transport
   const transport = new StdioServerTransport();
-  server.connect(transport).catch(err => {
+  server.connect(transport).catch((err) => {
     console.error("Failed to start MCP server:", err);
     process.exit(1);
   });
 
-  console.error("Pipedrive MCP Server started (stdio transport)");
+  console.error("Wiza MCP Server started (stdio transport)");
 }

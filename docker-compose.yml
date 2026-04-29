@@ -1,14 +1,16 @@
 services:
-  pipedrive-mcp-server:
+  wiza-mcp-server:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: pipedrive-mcp-server
+    container_name: wiza-mcp-server
     restart: unless-stopped
     environment:
-      # Required: Pipedrive API credentials
-      - PIPEDRIVE_API_TOKEN=${PIPEDRIVE_API_TOKEN}
-      - PIPEDRIVE_DOMAIN=${PIPEDRIVE_DOMAIN}
+      # Required: Wiza API key
+      - WIZA_API_KEY=${WIZA_API_KEY}
+
+      # Optional: Wiza base URL override
+      - WIZA_BASE_URL=${WIZA_BASE_URL:-https://wiza.co}
 
       # Optional: JWT authentication
       - MCP_JWT_SECRET=${MCP_JWT_SECRET:-}
@@ -18,26 +20,22 @@ services:
       - MCP_JWT_ISSUER=${MCP_JWT_ISSUER:-}
 
       # Optional: Rate limiting configuration
-      - PIPEDRIVE_RATE_LIMIT_MIN_TIME_MS=${PIPEDRIVE_RATE_LIMIT_MIN_TIME_MS:-250}
-      - PIPEDRIVE_RATE_LIMIT_MAX_CONCURRENT=${PIPEDRIVE_RATE_LIMIT_MAX_CONCURRENT:-2}
+      - WIZA_RATE_LIMIT_MIN_TIME_MS=${WIZA_RATE_LIMIT_MIN_TIME_MS:-1000}
+      - WIZA_RATE_LIMIT_MAX_CONCURRENT=${WIZA_RATE_LIMIT_MAX_CONCURRENT:-2}
 
       # Transport configuration (use 'sse' for Docker deployments)
       - MCP_TRANSPORT=${MCP_TRANSPORT:-sse}
       - MCP_PORT=${MCP_PORT:-3000}
       - MCP_ENDPOINT=${MCP_ENDPOINT:-/message}
 
-      # Node environment
       - NODE_ENV=production
 
-    # Expose the SSE port
     ports:
       - "${MCP_PORT:-3000}:${MCP_PORT:-3000}"
 
-    # Use stdin/stdout for MCP communication (only needed for stdio transport)
     stdin_open: true
     tty: true
 
-    # Health check
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:${MCP_PORT:-3000}/health", "||", "exit", "1"]
       interval: 30s
@@ -45,7 +43,6 @@ services:
       retries: 3
       start_period: 10s
 
-    # Logging configuration
     logging:
       driver: "json-file"
       options:

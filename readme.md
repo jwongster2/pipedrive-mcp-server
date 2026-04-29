@@ -1,205 +1,146 @@
-# Pipedrive MCP Server
+# Wiza MCP Server
 
-This is a Model Context Protocol (MCP) server that connects to the Pipedrive API v2. It allows you to expose Pipedrive data and functionality to LLM applications like Claude.
+A [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes the [Wiza](https://wiza.co/) contact and company enrichment API to LLM clients like Claude.
 
-## Features
+The focus is enrichment: turn a LinkedIn URL, an email, or a name + company into a verified work email, mobile phone number, current job title, location, and full firmographic context.
 
-- Read and write access to Pipedrive data
-- Exposes deals, persons, organizations, and pipelines
-- Includes all fields including custom fields
-- Predefined prompts for common operations
-- Docker support with multi-stage builds
-- JWT authentication support
-- Built-in rate limiting for API requests
-- Advanced deal filtering (by owner, status, date range, value, etc.)
-- Deal mutation tools for creating and updating deals
+## Tools
+
+| Tool | Description |
+| --- | --- |
+| `enrich-contact` | Start an individual reveal for one contact. Accepts a LinkedIn URL, an email, or `fullName` + `company`/`domain`. By default it polls until the reveal finishes and returns the resolved email/phone/title/location/company data. |
+| `get-enrichment` | Fetch the latest status of a previously started reveal by id (use when `enrich-contact` was called with `waitForCompletion: false`, or timed out). |
+| `enrich-company` | Synchronous company enrichment. Provide a name, domain, LinkedIn id, or LinkedIn slug. Returns industry, size, revenue range, funding, and location. |
+| `get-credits` | Show remaining email, phone, export, and API credits on the Wiza account. |
+| `create-enrichment-list` | Create a bulk list of up to 2,500 contacts. Each item can be a LinkedIn URL, email, or name + company/domain. |
+| `get-list` | Get the status and metadata of a bulk list. |
+| `get-list-contacts` | Once a list is `finished`, fetch the enriched contacts (filter by `people` / `valid` / `risky`). |
+| `prospect-search` | Search Wiza's prospect database with structured filters (job title, role, location, company, industry, etc.) and get the total count + up to 30 sample profiles. |
+
+## Prompts
+
+- `enrich-by-linkedin` - Enrich a contact from a LinkedIn URL
+- `enrich-by-name-and-company` - Enrich a contact from full name + company
+- `company-research` - Look up firmographic data for a company
+- `check-credit-balance` - Show remaining Wiza credits
 
 ## Setup
 
-### Standard Setup
+### 1. Get a Wiza API key
 
-1. Clone this repository
-2. Install dependencies:
-   ```
-   npm install
-   ```
-3. Create a `.env` file in the root directory with your configuration:
-   ```
-   PIPEDRIVE_API_TOKEN=your_api_token_here
-   PIPEDRIVE_DOMAIN=your-company.pipedrive.com
-   ```
-4. Build the project:
-   ```
-   npm run build
-   ```
-5. Start the server:
-   ```
-   npm start
-   ```
+Generate an API key at <https://wiza.co/app/settings/api>.
 
-### Docker Setup
+### 2. Install and run locally
 
-#### Option 1: Using Docker Compose (standalone)
-
-1. Copy `.env.example` to `.env` and configure your settings:
-   ```bash
-   PIPEDRIVE_API_TOKEN=your_api_token_here
-   PIPEDRIVE_DOMAIN=your-company.pipedrive.com
-   MCP_TRANSPORT=sse  # Use SSE transport for Docker
-   MCP_PORT=3000
-   ```
-2. Build and run with Docker Compose:
-   ```bash
-   docker-compose up -d
-   ```
-3. The server will be available at `http://localhost:3000`
-   - SSE endpoint: `http://localhost:3000/sse`
-   - Health check: `http://localhost:3000/health`
-
-#### Option 2: Using Pre-built Docker Image
-
-Pull and run the pre-built image from GitHub Container Registry:
-
-**For SSE transport (HTTP access):**
 ```bash
-docker run -d \
-  -p 3000:3000 \
-  -e PIPEDRIVE_API_TOKEN=your_api_token_here \
-  -e PIPEDRIVE_DOMAIN=your-company.pipedrive.com \
-  -e MCP_TRANSPORT=sse \
-  -e MCP_PORT=3000 \
-  ghcr.io/juhokoskela/pipedrive-mcp-server:main
+npm install
+cp .env.example .env
+# edit .env and set WIZA_API_KEY
+npm run build
+npm start
 ```
 
-**For stdio transport (local use):**
+For development with hot-loading TypeScript:
+
 ```bash
-docker run -i \
-  -e PIPEDRIVE_API_TOKEN=your_api_token_here \
-  -e PIPEDRIVE_DOMAIN=your-company.pipedrive.com \
-  ghcr.io/juhokoskela/pipedrive-mcp-server:main
+npm run dev
 ```
 
-#### Option 3: Integrating into Existing Project
+### 3. Use with Claude for Desktop
 
-Add the MCP server to your existing application's `docker-compose.yml`:
-
-```yaml
-services:
-  # Your existing services...
-
-  pipedrive-mcp-server:
-    image: ghcr.io/juhokoskela/pipedrive-mcp-server:main
-    container_name: pipedrive-mcp-server
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      - PIPEDRIVE_API_TOKEN=${PIPEDRIVE_API_TOKEN}
-      - PIPEDRIVE_DOMAIN=${PIPEDRIVE_DOMAIN}
-      - MCP_TRANSPORT=sse
-      - MCP_PORT=3000
-      - PIPEDRIVE_RATE_LIMIT_MIN_TIME_MS=${PIPEDRIVE_RATE_LIMIT_MIN_TIME_MS:-250}
-      - PIPEDRIVE_RATE_LIMIT_MAX_CONCURRENT=${PIPEDRIVE_RATE_LIMIT_MAX_CONCURRENT:-2}
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/health", "||", "exit", "1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-```
-
-Then add the required environment variables to your `.env` file.
-
-### Environment Variables
-
-Required:
-- `PIPEDRIVE_API_TOKEN` - Your Pipedrive API token
-- `PIPEDRIVE_DOMAIN` - Your Pipedrive domain (e.g., `your-company.pipedrive.com`)
-
-Optional (JWT Authentication):
-- `MCP_JWT_SECRET` - JWT secret for authentication
-- `MCP_JWT_TOKEN` - JWT token for authentication
-- `MCP_JWT_ALGORITHM` - JWT algorithm (default: HS256)
-- `MCP_JWT_AUDIENCE` - JWT audience
-- `MCP_JWT_ISSUER` - JWT issuer
-
-When JWT authentication is enabled, all SSE requests (`/sse` and the message endpoint) must include an `Authorization: Bearer <token>` header signed with the configured secret.
-
-Optional (Rate Limiting):
-- `PIPEDRIVE_RATE_LIMIT_MIN_TIME_MS` - Minimum time between requests in milliseconds (default: 250)
-- `PIPEDRIVE_RATE_LIMIT_MAX_CONCURRENT` - Maximum concurrent requests (default: 2)
-
-Optional (Transport Configuration):
-- `MCP_TRANSPORT` - Transport type: `stdio` (default, for local use) or `sse` (for Docker/HTTP access)
-- `MCP_PORT` - Port for SSE transport (default: 3000, only used when `MCP_TRANSPORT=sse`)
-- `MCP_ENDPOINT` - Message endpoint path for SSE (default: /message, only used when `MCP_TRANSPORT=sse`)
-
-## Using with Claude
-
-To use this server with Claude for Desktop:
-
-1. Configure Claude for Desktop by editing your `claude_desktop_config.json`:
+Add the server to `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "pipedrive": {
+    "wiza": {
       "command": "node",
-      "args": ["/path/to/pipedrive-mcp-server/build/index.js"],
+      "args": ["/absolute/path/to/wiza-mcp-server/build/index.js"],
       "env": {
-        "PIPEDRIVE_API_TOKEN": "your_api_token_here",
-        "PIPEDRIVE_DOMAIN": "your-company.pipedrive.com"
+        "WIZA_API_KEY": "your_wiza_api_key_here"
       }
     }
   }
 }
 ```
 
-2. Restart Claude for Desktop
-3. In the Claude application, you should now see the Pipedrive tools available
+Restart Claude Desktop and the Wiza tools will appear in the tool picker.
 
-## Available Tools
+## Docker
 
-- `get-users`: Get all users/owners from Pipedrive to identify owner IDs for filtering
-- `get-deals`: Get deals with flexible filtering options (search by title, date range, owner, stage, status, value range, etc.)
-- `get-deal`: Get a specific deal by ID (including custom fields)
-- `update-deal`: Update an existing deal, including custom fields via JSON input, but cannot change stage
-- `create-deal`: Create a new deal, including custom fields via JSON input, but cannot set stage
-- `create-person`: Create a new person/contact
-- `update-person`: Update an existing person/contact
-- `create-organization`: Create a new organization/company
-- `add-note`: Add a note to a deal, person, organization, or lead
-- `create-note`: Alias for adding a note
-- `create-activity`: Create an activity/task/reminder
-- `get-deal-notes`: Get detailed notes and custom booking details for a specific deal
-- `search-deals`: Search deals by term
-- `get-persons`: Get all persons from Pipedrive (including custom fields)
-- `get-person`: Get a specific person by ID (including custom fields)
-- `search-persons`: Search persons by term
-- `get-organizations`: Get all organizations from Pipedrive (including custom fields)
-- `get-organization`: Get a specific organization by ID (including custom fields)
-- `search-organizations`: Search organizations by term
-- `get-pipelines`: Get all pipelines from Pipedrive
-- `get-pipeline`: Get a specific pipeline by ID
-- `get-stages`: Get all stages from all pipelines
-- `search-leads`: Search leads by term
-- `search-all`: Search across all item types (deals, persons, organizations, etc.)
+### Docker Compose
 
-## Available Prompts
+```bash
+cp .env.example .env
+# set WIZA_API_KEY and (optionally) MCP_TRANSPORT=sse
+docker compose up -d
+```
 
-- `list-all-deals`: List all deals in Pipedrive
-- `list-all-persons`: List all persons in Pipedrive
-- `list-all-pipelines`: List all pipelines in Pipedrive
-- `analyze-deals`: Analyze deals by stage
-- `analyze-contacts`: Analyze contacts by organization
-- `analyze-leads`: Analyze leads by status
-- `compare-pipelines`: Compare different pipelines and their stages
-- `find-high-value-deals`: Find high-value deals
+The SSE endpoint will be available at:
+
+- SSE: `http://localhost:3000/sse`
+- Messages: `http://localhost:3000/message`
+- Health check: `http://localhost:3000/health`
+
+### Plain `docker run`
+
+Stdio (for local CLI clients):
+
+```bash
+docker run -i \
+  -e WIZA_API_KEY=your_wiza_api_key_here \
+  wiza-mcp-server
+```
+
+SSE (for HTTP/remote clients):
+
+```bash
+docker run -d \
+  -p 3000:3000 \
+  -e WIZA_API_KEY=your_wiza_api_key_here \
+  -e MCP_TRANSPORT=sse \
+  -e MCP_PORT=3000 \
+  wiza-mcp-server
+```
+
+## Environment variables
+
+Required:
+
+- `WIZA_API_KEY` – Your Wiza API key
+
+Optional:
+
+- `WIZA_BASE_URL` – Override the Wiza API base URL (default: `https://wiza.co`)
+- `WIZA_RATE_LIMIT_MIN_TIME_MS` – Minimum ms between requests (default: `1000`)
+- `WIZA_RATE_LIMIT_MAX_CONCURRENT` – Max concurrent requests (default: `2`)
+- `MCP_TRANSPORT` – `stdio` (default) or `sse`
+- `MCP_PORT` – Port for SSE transport (default: `3000`)
+- `MCP_ENDPOINT` – Message endpoint path for SSE (default: `/message`)
+
+JWT authentication for SSE (optional):
+
+- `MCP_JWT_SECRET`
+- `MCP_JWT_TOKEN`
+- `MCP_JWT_ALGORITHM` (default: `HS256`)
+- `MCP_JWT_AUDIENCE`
+- `MCP_JWT_ISSUER`
+
+When `MCP_JWT_SECRET` is set, all SSE requests (`/sse` and the message endpoint) must include an `Authorization: Bearer <token>` header signed with the configured secret.
+
+## Example: enrich a contact
+
+Once connected, asking Claude something like:
+
+> Use Wiza to enrich Stephen Hakami at wiza.co. I want his work email and mobile.
+
+…will trigger the `enrich-contact` tool with `fullName: "Stephen Hakami"`, `domain: "wiza.co"`, and `enrichmentLevel: "full"`, then return the resolved email, mobile phone, title, location, and company data once the reveal finishes (typically a few seconds).
+
+## Notes
+
+- `enrich-contact` defaults to `enrichmentLevel: "full"` (email + phone) and `waitForCompletion: true`. If a reveal does not finish within `timeoutSeconds` (default 120), the tool returns the latest state and the `revealId`; you can poll later with `get-enrichment`.
+- `enrich-company` is synchronous and costs 2 API credits per successful lookup. Wiza limits this endpoint to 30 requests/minute.
+- Bulk lists are async. After `create-enrichment-list`, poll `get-list` until `status: finished`, then call `get-list-contacts`.
 
 ## License
 
