@@ -8,8 +8,8 @@ WORKDIR /app
 COPY package*.json ./
 COPY tsconfig.json ./
 
-# Install dependencies
-RUN npm ci
+# Install dependencies (use `npm install` so the build works without a committed lockfile)
+RUN npm install --no-audit --no-fund
 
 # Copy source code
 COPY src ./src
@@ -30,7 +30,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install production dependencies only
-RUN npm ci --only=production
+RUN npm install --omit=dev --no-audit --no-fund
 
 # Copy built application from builder stage
 COPY --from=builder /app/build ./build
